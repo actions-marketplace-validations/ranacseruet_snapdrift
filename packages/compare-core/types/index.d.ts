@@ -48,11 +48,24 @@ export interface CompareResult {
 
 export type CompareBuffersResult = CompareResult;
 
-export interface CompareImagesOptions extends DiffImageOptions {}
+export interface CompareImagesOptions extends DiffImageOptions {
+  /**
+   * Whether to render and return `diffImageBuffer`. Default: `true`.
+   * Set to `false` to skip the PNG encode for callers that only need metrics.
+   */
+  renderDiffImage?: boolean;
+}
 
 export interface CompareImagesResult extends CompareResult {
   /** Visual diff generated from the same decoded images as the metrics. */
   diffImageBuffer: Buffer;
+  /** Dimensions and effective denominator used by the union-canvas comparison. */
+  comparison: ComparisonMetadata;
+}
+
+export interface CompareImagesMetricsResult extends CompareResult {
+  /** Absent because `renderDiffImage: false` was passed. */
+  diffImageBuffer?: never;
   /** Dimensions and effective denominator used by the union-canvas comparison. */
   comparison: ComparisonMetadata;
 }
@@ -64,6 +77,13 @@ export class ComparisonTooLargeError extends Error {
 export const MAX_COMPARISON_PIXELS: number;
 
 export function compareBuffers(baselineBuffer: Buffer, currentBuffer: Buffer): CompareBuffersResult;
+/** Metrics-only overload: `diffImageBuffer` is not rendered. */
+export function compareImages(
+  baselineBuffer: Buffer,
+  currentBuffer: Buffer,
+  options: CompareImagesOptions & { renderDiffImage: false }
+): CompareImagesMetricsResult;
+/** Renders and returns the visual diff (default). */
 export function compareImages(baselineBuffer: Buffer, currentBuffer: Buffer, options?: CompareImagesOptions): CompareImagesResult;
 export function compareWithIgnoreRegions(baselineBuffer: Buffer, currentBuffer: Buffer, regions: IgnoreRegion[]): CompareBuffersResult;
 export function generateDiffImage(baselineBuffer: Buffer, currentBuffer: Buffer, options?: DiffImageOptions): Buffer;
