@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 - 2026-09-16
 
 ### Fixes
 
@@ -30,6 +30,22 @@
   idempotency, and storage behavior as if it succeeded. Both contradicted the
   CLI, which has failed the direction since 0.7.0 with a pointer to
   `snapdrift baseline`.
+- Document the screenshot size budget's memory cost for `maxPixels` callers: the
+  comparison retains both decoded RGBA inputs plus the optional diff canvas, so the
+  floor is roughly 12 bytes per union pixel before PNG overhead (~32-35 measured end
+  to end), and the ceiling should be sized against a measured peak rather than that
+  arithmetic.
+
+### Workspace packages
+
+- `@snapdrift/adapter-report-md` 1.2.1 publishes the `[object Object]` viewport fix;
+  `@snapdrift/compare-core` 1.3.0 publishes the per-call `maxPixels` option and the
+  new size-budget guidance.
+- The root package's dependency floors move to `^1.2.1` (adapter-report-md) and
+  `^1.3.0` (compare-core) so `snapdrift` 0.12.0 actually requires those fixes. A
+  retained lockfile resolution of adapter-report-md 1.2.0 still satisfies `^1.2.0`,
+  so without the floor bump an upgrade of `snapdrift` alone could install the
+  unfixed report renderer.
 
 ## 0.11.0 - 2026-09-14
 
