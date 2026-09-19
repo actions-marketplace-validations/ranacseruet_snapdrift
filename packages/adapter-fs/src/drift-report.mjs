@@ -4,14 +4,19 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { loadSnapdriftConfig, readFirstDefinedEnv } from './config.mjs';
+import { loadSnapdriftConfig, readFirstDefinedEnv, SNAPDRIFT_CAPTURE_CONCURRENCY } from './config.mjs';
+import { createConcurrencyLimiter } from './concurrency.mjs';
 import { comparePngs, resolveImagePath, loadJson, clearFileIndexCache } from './compare-files.mjs';
 import {
   selectConfiguredRoutes,
   splitCommaList,
   resolveFromWorkingDirectory,
+  validateManifest,
+  checkCaptureProfileCompatibility,
+  normalizedViewportIdentity,
   indexManifestEntries,
   indexRouteResults,
+  sanitizeRouteId,
   determineDriftStatus,
   shouldFailDriftCheck
 } from '@snapdrift/manifest';
@@ -19,9 +24,9 @@ import { makeMarkdown, formatDriftFailureMessage } from '@snapdrift/adapter-repo
 
 /** @typedef {import('../../manifest/types/index').VisualBaselineResults} BaselineResults */
 /** @typedef {import('../../manifest/types/index').VisualDiffChangedItem} DriftChangedItem */
-/** @typedef {import('../../manifest/types/index').VisualDiffDimensionItem} DriftDimensionItem */
 /** @typedef {import('../../manifest/types/index').VisualDiffErrorItem} DriftErrorItem */
 /** @typedef {import('../../manifest/types/index').VisualDiffSummary} DriftSummary */
+/** @typedef {import('../../manifest/types/index').ComparisonPolicy} ComparisonPolicy */
 /** @typedef {import('../../manifest/types/index').VisualScreenshotManifest} ScreenshotManifest */
 /** @typedef {import('../../manifest/types/index').VisualScreenshotManifestEntry} ScreenshotManifestEntry */
 
@@ -34,6 +39,8 @@ import { makeMarkdown, formatDriftFailureMessage } from '@snapdrift/adapter-repo
  *   currentManifestPath?: string,
  *   baselineRunDir?: string,
  *   currentRunDir?: string,
+ *   diffImagesDir?: string,
+ *   comparisonPolicy?: ComparisonPolicy,
  *   routeIds?: Iterable<string>,
  *   baselineArtifactName?: string,
  *   baselineSourceSha?: string
@@ -44,10 +51,12 @@ export async function generateDriftReport(options = {}) {
   clearFileIndexCache();
 
   const { config } = await loadSnapdriftConfig(options.configPath);
-  const selectedRouteIds = selectConfiguredRoutes(
-    config,
-    options.routeIds || splitCommaList(readFirstDefinedEnv(['SNAPDRIFT_ROUTE_IDS']))
-  ).selectedRouteIds;
+  const requestedPolicy = options.comparisonPolicy ?? config.diff.comparisonPolicy;
+  /** @type {ComparisonPolicy} */
+  const comparisonPolicy = requestedPolicy
+    ? { ...requestedPolicy, threshold: requestedPolicy.threshold ?? config.diff.threshold }
+    : { version: 1, threshold: config.diff.threshold };
+  const selectedRouteIds = selectConfiguredRoutes(config, options.routeIds || splitCommaList(readFirstDefinedEnv(['SNAPDRIFT_ROUTE_IDS']))).selectedRouteIds;
 
   const resolvedBaselineResultsPath = path.resolve(
     options.baselineResultsPath || readFirstDefinedEnv(['SNAPDRIFT_BASELINE_RESULTS_PATH']) || resolveFromWorkingDirectory(config, config.resultsFile)
@@ -73,10 +82,13 @@ export async function generateDriftReport(options = {}) {
     loadJson(resolvedCurrentManifestPath, 'current screenshot manifest')
   ]);
 
+  const validatedBaselineManifest = validateManifest(baselineManifest, 'baseline screenshot manifest');
+  const validatedCurrentManifest = validateManifest(currentManifest, 'current screenshot manifest');
+  const captureCompatibility = checkCaptureProfileCompatibility(validatedBaselineManifest.captureProfile, validatedCurrentManifest.captureProfile);
   const baselineRouteResults = indexRouteResults(/** @type {BaselineResults} */ (baselineResults));
   const currentRouteResults = indexRouteResults(/** @type {BaselineResults} */ (currentResults));
-  const baselineEntries = indexManifestEntries(/** @type {ScreenshotManifest} */ (baselineManifest), selectedRouteIds);
-  const currentEntries = indexManifestEntries(/** @type {ScreenshotManifest} */ (currentManifest), selectedRouteIds);
+  const baselineEntries = indexManifestEntries(validatedBaselineManifest, selectedRouteIds, 'baseline screenshot manifest');
+  const currentEntries = indexManifestEntries(validatedCurrentManifest, selectedRouteIds, 'current screenshot manifest');
 
   const envBaselineArtifactName = readFirstDefinedEnv(['SNAPDRIFT_BASELINE_ARTIFACT_NAME']) || '';
   const envBaselineSourceSha = readFirstDefinedEnv(['SNAPDRIFT_BASELINE_SOURCE_SHA']) || '';
@@ -89,7 +101,7 @@ export async function generateDriftReport(options = {}) {
     baselineManifestPath: resolvedBaselineManifestPath,
     currentManifestPath: resolvedCurrentManifestPath,
     diffMode: config.diff.mode,
-    threshold: config.diff.threshold,
+    threshold: comparisonPolicy.threshold,
     totalScreenshots: selectedRouteIds.length,
     matchedScreenshots: 0,
     changedScreenshots: 0,
@@ -100,10 +112,16 @@ export async function generateDriftReport(options = {}) {
     errors: [],
     dimensionChanges: [],
     selectedRoutes: selectedRouteIds,
+    comparisonPolicy: { ...comparisonPolicy },
     baselineArtifactName: options.baselineArtifactName || envBaselineArtifactName || undefined,
     baselineSourceSha: options.baselineSourceSha || envBaselineSourceSha || undefined,
-    baselineAvailable: true
+    baselineAvailable: true,
+    captureCompatibility,
+    message: captureCompatibility.status === 'unverified' ? captureCompatibility.reason : undefined
   };
+
+  /** @type {{ routeId: string, routeConfig: import('@snapdrift/manifest').VisualRegressionRouteConfig | undefined, baselineEntry: ScreenshotManifestEntry, currentEntry: ScreenshotManifestEntry }[]} */
+  const comparableRoutes = [];
 
   for (const routeId of selectedRouteIds) {
     const routeConfig = config.routes.find((route) => route.id === routeId);
@@ -155,60 +173,106 @@ export async function generateDriftReport(options = {}) {
       continue;
     }
 
-    try {
-      if (baselineEntry.width !== currentEntry.width || baselineEntry.height !== currentEntry.height) {
-      /** @type {DriftDimensionItem} */
-      const dimensionRecord = {
-          id: routeId,
-          path: currentEntry.path || baselineEntry.path || routeConfig?.path,
-          viewport: currentEntry.viewport || baselineEntry.viewport || routeConfig?.viewport,
-          baselineWidth: baselineEntry.width,
-          baselineHeight: baselineEntry.height,
-          currentWidth: currentEntry.width,
-          currentHeight: currentEntry.height,
-          status: 'dimension-changed'
-        };
-        summary.dimensionChanges.push(dimensionRecord);
-        continue;
+    let incompatibility = captureCompatibility.status === 'incompatible' ? captureCompatibility.reason : undefined;
+    for (const { location, entry } of [{ location: 'baseline', entry: baselineEntry }, { location: 'current', entry: currentEntry }]) {
+      if (entry.path !== routeConfig.path) {
+        incompatibility = `${location} route path differs from configured path "${routeConfig.path}"`;
+        break;
       }
-
-      const [resolvedBaselineImagePath, resolvedCurrentImagePath] = await Promise.all([
-        resolveImagePath(resolvedBaselineRunDir, baselineEntry.imagePath),
-        resolveImagePath(resolvedCurrentRunDir, currentEntry.imagePath)
-      ]);
-      const comparison = await comparePngs(resolvedBaselineImagePath, resolvedCurrentImagePath);
-
-      if (comparison.mismatchRatio <= config.diff.threshold) {
-        summary.matchedScreenshots += 1;
-        continue;
+      if (normalizedViewportIdentity(entry.viewport) !== normalizedViewportIdentity(routeConfig.viewport)) {
+        incompatibility = `${location} normalized viewport differs from configured viewport`;
+        break;
       }
-
-      /** @type {DriftChangedItem} */
-      const changedRecord = {
+    }
+    if (incompatibility) {
+      summary.errors.push({
         id: routeId,
-        path: currentEntry.path,
-        viewport: currentEntry.viewport,
-        baselineImagePath: baselineEntry.imagePath,
-        currentImagePath: currentEntry.imagePath,
-        width: comparison.width,
-        height: comparison.height,
-        differentPixels: comparison.differentPixels,
-        totalPixels: comparison.totalPixels,
-        mismatchRatio: comparison.mismatchRatio,
-        status: 'changed'
-      };
-      summary.changedScreenshots += 1;
-      summary.changed.push(changedRecord);
-    } catch (error) {
-      /** @type {DriftErrorItem} */
-      const errorRecord = {
-        id: routeId,
-        path: currentEntry.path || baselineEntry.path || routeConfig?.path,
-        viewport: currentEntry.viewport || baselineEntry.viewport || routeConfig?.viewport,
+        path: routeConfig.path,
+        viewport: routeConfig.viewport,
         status: 'error',
-        message: error instanceof Error ? error.message : String(error)
-      };
-      summary.errors.push(errorRecord);
+        code: 'incompatible_capture',
+        message: `Incompatible capture: ${incompatibility}. Refresh the baseline in the current capture environment. Use report-only for intentional nonblocking inspection; incompatible pixels are not compared.`
+      });
+      continue;
+    }
+
+    comparableRoutes.push({ routeId, routeConfig, baselineEntry, currentEntry });
+  }
+
+  const comparisonThreshold = comparisonPolicy.threshold;
+  const shouldRenderDiffImage = Boolean(options.diffImagesDir);
+
+  // Resolve, read, compare, and (when needed) write the diff image for each
+  // route concurrently, capped so a large suite does not hold every
+  // decoded/encoded PNG pair in memory at once. Records are stored by original
+  // index so counts and summary arrays stay deterministic.
+  /** @type {Array<{ kind: 'matched' } | { kind: 'changed', item: DriftChangedItem } | { kind: 'error', item: DriftErrorItem }>} */
+  const records = new Array(comparableRoutes.length);
+  const limit = createConcurrencyLimiter(SNAPDRIFT_CAPTURE_CONCURRENCY);
+  await Promise.all(
+    comparableRoutes.map(({ routeId, routeConfig, baselineEntry, currentEntry }, index) =>
+      limit(async () => {
+        try {
+          const [baselineImagePath, currentImagePath] = await Promise.all([
+            resolveImagePath(resolvedBaselineRunDir, baselineEntry.imagePath),
+            resolveImagePath(resolvedCurrentRunDir, currentEntry.imagePath)
+          ]);
+          const comparison = /** @type {import('@snapdrift/compare-core').CompareImagesResult} */ (
+            await comparePngs(baselineImagePath, currentImagePath, { comparisonPolicy, renderDiffImage: shouldRenderDiffImage })
+          );
+          const dimensionsChanged = comparison.comparison.dimensionsChanged;
+
+          if (!dimensionsChanged && comparison.mismatchRatio <= comparisonThreshold) {
+            records[index] = { kind: 'matched' };
+            return;
+          }
+
+          /** @type {DriftChangedItem} */
+          const changedRecord = {
+            id: routeId,
+            path: currentEntry.path,
+            viewport: currentEntry.viewport,
+            baselineImagePath: baselineEntry.imagePath,
+            currentImagePath: currentEntry.imagePath,
+            width: comparison.width,
+            height: comparison.height,
+            differentPixels: comparison.differentPixels,
+            totalPixels: comparison.totalPixels,
+            mismatchRatio: comparison.mismatchRatio,
+            status: 'changed',
+            comparison: comparison.comparison
+          };
+
+          if (options.diffImagesDir && comparison.diffImageBuffer) {
+            const diffFileName = `${sanitizeRouteId(routeId)}.png`;
+            await fs.mkdir(options.diffImagesDir, { recursive: true });
+            await fs.writeFile(path.join(options.diffImagesDir, diffFileName), comparison.diffImageBuffer);
+            changedRecord.diffImagePath = path.posix.join('diffs', diffFileName);
+          }
+          records[index] = { kind: 'changed', item: changedRecord };
+        } catch (error) {
+          /** @type {DriftErrorItem} */
+          const errorRecord = {
+            id: routeId,
+            path: currentEntry.path || baselineEntry.path || routeConfig?.path,
+            viewport: currentEntry.viewport || baselineEntry.viewport || routeConfig?.viewport,
+            status: 'error',
+            message: error instanceof Error ? error.message : String(error)
+          };
+          records[index] = { kind: 'error', item: errorRecord };
+        }
+      })
+    )
+  );
+
+  for (const record of records) {
+    if (record.kind === 'error') {
+      summary.errors.push(record.item);
+    } else if (record.kind === 'changed') {
+      summary.changedScreenshots += 1;
+      summary.changed.push(record.item);
+    } else {
+      summary.matchedScreenshots += 1;
     }
   }
 
@@ -225,6 +289,8 @@ export async function generateDriftReport(options = {}) {
 /**
  * @param {Parameters<typeof generateDriftReport>[0] & {
  *   outDir?: string,
+ *   diffImagesDir?: string,
+ *   comparisonPolicy?: ComparisonPolicy,
  *   summaryPath?: string,
  *   markdownPath?: string,
  *   enforceOutcome?: boolean
@@ -235,20 +301,19 @@ export async function runDriftCheckCli(options = {}) {
   const resolvedOutDir = path.resolve(
     options.outDir || readFirstDefinedEnv(['SNAPDRIFT_DRIFT_OUT_DIR']) || path.join('qa-artifacts', 'snapdrift', 'drift', 'current')
   );
-  const resolvedSummaryPath = path.resolve(
-    options.summaryPath || readFirstDefinedEnv(['SNAPDRIFT_SUMMARY_PATH']) || path.join(resolvedOutDir, 'summary.json')
-  );
+  const resolvedSummaryPath = path.resolve(options.summaryPath || readFirstDefinedEnv(['SNAPDRIFT_SUMMARY_PATH']) || path.join(resolvedOutDir, 'summary.json'));
   const resolvedMarkdownPath = path.resolve(
     options.markdownPath || readFirstDefinedEnv(['SNAPDRIFT_SUMMARY_MARKDOWN_PATH']) || path.join(resolvedOutDir, 'summary.md')
   );
-  const shouldEnforceOutcome = options.enforceOutcome ?? (readFirstDefinedEnv(['SNAPDRIFT_ENFORCE_OUTCOME']) !== '0');
+  const shouldEnforceOutcome = options.enforceOutcome ?? readFirstDefinedEnv(['SNAPDRIFT_ENFORCE_OUTCOME']) !== '0';
+  const resolvedDiffImagesDir = path.resolve(options.diffImagesDir || path.join(resolvedOutDir, 'diffs'));
 
   await fs.mkdir(resolvedOutDir, { recursive: true });
-  const { summary, markdown } = await generateDriftReport(options);
-  await Promise.all([
-    fs.writeFile(resolvedSummaryPath, JSON.stringify(summary, null, 2)),
-    fs.writeFile(resolvedMarkdownPath, markdown)
-  ]);
+  const { summary, markdown } = await generateDriftReport({
+    ...options,
+    diffImagesDir: resolvedDiffImagesDir
+  });
+  await Promise.all([fs.writeFile(resolvedSummaryPath, JSON.stringify(summary, null, 2)), fs.writeFile(resolvedMarkdownPath, markdown)]);
 
   if (shouldEnforceOutcome && shouldFailDriftCheck(summary)) {
     throw new Error(formatDriftFailureMessage(summary.diffMode, summary));

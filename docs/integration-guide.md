@@ -46,7 +46,7 @@ SnapDrift owns route selection, capture, comparison, skipped-report generation, 
 
 ```yaml
 - name: SnapDrift Baseline
-  uses: ranacseruet/snapdrift@v0.8.2
+  uses: ranacseruet/snapdrift@v0.12.0
   with:
     mode: baseline
     repo-config-path: .github/snapdrift.json
@@ -71,7 +71,7 @@ Then add SnapDrift after the app is running:
 
 ```yaml
 - name: SnapDrift Report
-  uses: ranacseruet/snapdrift@v0.8.2
+  uses: ranacseruet/snapdrift@v0.12.0
   with:
     mode: pr-diff
     github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -86,8 +86,8 @@ The wrappers remain published in their own right, and are equivalent to the disp
 
 | Entry point | Equivalent to |
 |-------------|---------------|
-| `ranacseruet/snapdrift@v0.8.2` with `mode: baseline` | `ranacseruet/snapdrift/actions/baseline@v0.8.2` |
-| `ranacseruet/snapdrift@v0.8.2` with `mode: pr-diff` | `ranacseruet/snapdrift/actions/pr-diff@v0.8.2` |
+| `ranacseruet/snapdrift@v0.12.0` with `mode: baseline` | `ranacseruet/snapdrift/actions/baseline@v0.12.0` |
+| `ranacseruet/snapdrift@v0.12.0` with `mode: pr-diff` | `ranacseruet/snapdrift/actions/pr-diff@v0.12.0` |
 
 Use the wrappers directly when you want to skip the dispatcher's input indirection, and the lower-level `capture`, `compare`, `scope`, `resolve-baseline`, `stage`, `comment`, and `enforce` actions when you need to orchestrate the stages yourself.
 
@@ -130,7 +130,7 @@ jobs:
           done
 
       - name: SnapDrift Report
-        uses: ranacseruet/snapdrift@v0.8.2
+        uses: ranacseruet/snapdrift@v0.12.0
         with:
           mode: pr-diff
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -170,7 +170,7 @@ jobs:
           done
 
       - name: SnapDrift Report
-        uses: ranacseruet/snapdrift@v0.8.2
+        uses: ranacseruet/snapdrift@v0.12.0
         with:
           mode: pr-diff
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -187,6 +187,15 @@ jobs:
 - Publishes the workflow summary
 - Upserts the PR report
 - Enforces `diff.mode` after publication completes
+
+When the wrapper scopes a pull request from GitHub's changed-file list, a
+renamed file contributes both its new and previous paths. A move out of a
+watched directory therefore still selects the route that owned the old path,
+while a move into a watched or shared path selects the new scope as well.
+Repeated paths are deduplicated, and `route-ids` or `force-run` keep their
+existing precedence. GitHub caps this file listing at 3,000 records; if that
+limit is reached, the actions run all configured routes with scope reason
+`changed_files_truncated` instead of trusting a potentially incomplete list.
 
 ## Useful overrides
 
@@ -205,7 +214,7 @@ jobs:
 | `max-changed-rows` | `20` | Max changed-route rows shown in the PR comment before truncation |
 | `max-error-rows` | `10` | Max error rows shown in the PR comment before truncation |
 
-The `pr-diff` action also exposes outputs you can use in subsequent steps: `should-run`, `scope-reason`, `selected-route-ids`, `baseline-found`, `status`, `summary-path`, `markdown-path`, `artifact-name`, `bundle-dir`. See the wrapper action's `outputs:` block for the canonical list.
+The `pr-diff` action also exposes outputs you can use in subsequent steps: `should-run`, `scope-reason`, `selected-route-ids`, `baseline-found`, `baseline-resolution-status`, `status`, `summary-path`, `markdown-path`, `artifact-name`, `bundle-dir`. `baseline-resolution-status` is `found`, `missing`, or `error`; `missing` is the intentional first-baseline case, while `error` means the GitHub lookup failed and causes local comparisons or local Snap fallbacks to fail. Healthy hosted Snap diffs can continue without the downloaded GitHub artifact. See the wrapper action's `outputs:` block for the canonical list.
 
 ## Hosted Snap provider
 
@@ -234,16 +243,17 @@ Both behaviors apply at every phase of a run — capture, diff, and baseline pub
 
 Hosted baseline publication is complete and default-branch-only. SnapDrift rejects scoped baseline capture before creating the run, records the configured/selected route ids and exact route/viewport identities, and publishes only when every expected capture finishes successfully with a stored image. The run records one resolved branch and commit (`branch` / `prHeadSha`) plus a publication workflow ref and monotonic sequence. GitHub Actions provides these automatically; other CI systems may set `SNAPDRIFT_PUBLICATION_WORKFLOW_REF` and `SNAPDRIFT_PUBLICATION_SEQUENCE`. Snap uses the sequence for same-workflow ordering and source-run timestamps for cross-workflow freshness. Missing, failed, duplicate, or unexpected captures abort publication without replacing the accepted baseline. If a source run loses the race to a newer candidate, the API returns `409 baseline_stale_source`; an inconsistent manifest/source workflow identity returns `409 baseline_source_run_mismatch` with `details.reason = "workflow_mismatch"`. Workflow-ref rotation itself is supported. This restriction does not apply to non-publishing hosted captures, hosted PR-diff runs, or local-provider baselines.
 
-The Snap API client retries 5xx and network errors with exponential backoff (3 attempts, 1 s → 2 s → 4 s, capped at 30 s). 4xx errors never retry and never fall back.
+The Snap API client retries 5xx, network errors, and transport timeouts with exponential backoff (3 attempts, 1 s → 2 s → 4 s, with each delay capped at 30 s). JSON request attempts are limited to 30 seconds and binary baseline exports to 120 seconds. Each Snap operation has a 10-minute deadline covering its requests, retries, backoff, and polling; stalled headers and response bodies are aborted and cannot keep the workflow waiting indefinitely. Retry and poll waits are clipped to the remaining operation time. Received 4xx errors never retry or fall back; if a 4xx diagnostic body stalls, the response remains a non-retryable error with its HTTP status and timeout diagnostic. When a deadline or other retryable transport failure is exhausted, `onUnavailable` controls fail, warn-and-skip, or fallback-local behavior.
 
 When `provider: "snap"` and `baseUrl` points to a local address (localhost, `127.0.0.0/8`, `::1`, or `0.0.0.0`), SnapDrift uses a **local-capture hybrid**: Playwright runs on the runner to render the page, then SnapDrift uploads the resulting screenshots to Snap. This makes it possible to point SnapDrift at a server that only the runner can reach (a typical case) without exposing the server to Snap's render worker.
 
 With the Snap provider, the PR comment includes a **"View in dashboard →"** link that points to `${apiUrl}/dashboard/visual/${projectId}/runs/${runId}`. The local provider omits the link.
 
-Migrating an existing local repo to the Snap provider is a one-shot CLI command:
+To adopt the hosted provider, seed the project with a hosted baseline. `migrate-baselines --to snap` is **not** the way to do it — Snap cannot accept a pre-built local baseline bundle, because the screenshots it carries are never uploaded to Snap storage and its manifest references local filenames rather than Snap object keys. Use `snapdrift baseline` with `provider: "snap"` instead: it captures each route through Snap so the pixels actually land in storage before the baseline manifest is published. Canonical hosted publication is CI-only — run it from your default-branch job, where GitHub Actions supplies the publication metadata automatically (other CI systems set `SNAPDRIFT_PUBLICATION_WORKFLOW_REF` and `SNAPDRIFT_PUBLICATION_SEQUENCE`); a plain local checkout fails before creating a hosted run.
 
 ```bash
-snapdrift migrate-baselines --to snap
+# In CI, on the default branch, with provider: "snap"
+snapdrift baseline
 ```
 
 Conversely, downloading a Snap baseline back to a local directory (useful for reproducible local debugging) is:
@@ -267,10 +277,13 @@ The `pr-diff` wrapper composes the following low-level steps. They're still avai
 - `actions/capture` — capture routes and emit `results.json` + `manifest.json`
 - `actions/compare` — diff current capture against a baseline
 - `actions/scope` — decide whether to run and which routes to select from changed files
-- `actions/resolve-baseline` — find and download the latest successful baseline artifact
+- `actions/resolve-baseline` — find and download the latest successful baseline artifact; its
+  `resolution-status` output distinguishes `found`, `missing`, and `error`; the action fails for
+  `error`, while `missing` remains the intentional first-baseline result
 - `actions/stage` — assemble the baseline or diff bundle for upload
 - `actions/enforce` — evaluate the summary against `diff.mode` and fail when required
-- `actions/comment` — upsert a PR comment from a summary (provider-aware)
+- `actions/comment` — upsert a PR comment from a summary (provider-aware); pass
+  `artifact-url` from `upload-artifact` when local diff PNGs are present
 
 The two wrapper actions that orchestrate the full pipeline are `actions/baseline` (publish) and `actions/pr-diff` (drift detection). They are the primary integration points.
 
@@ -285,9 +298,6 @@ snapdrift capture
 # After making changes, compare and open the HTML report
 snapdrift diff --open
 
-# Migrate an established local baseline to the hosted Snap backend
-snapdrift migrate-baselines --to snap
-
 # Translate a snap/github-action workflow into snapdrift.json
 snapdrift init --from-snap-action .github/workflows/snap.yml
 ```
@@ -298,7 +308,11 @@ See the [Local CLI guide](local-cli.md) for full command reference, flags, direc
 
 ## Refresh the baseline automatically
 
-After an intentional layout change or dimension shift merges, the baseline must be republished before SnapDrift can compare like-for-like frames again. Without automation, this is a manual step.
+After an intentional layout change merges, the baseline can be republished as
+usual. Local comparisons always apply comparison policy v1
+(`{ "version": 1, "threshold": number }`) — synthesized from `diff.threshold`
+when not configured — so unequal frames are compared on a union canvas and
+dimension metadata stays in the report.
 
 Use the provided workflow template to refresh the baseline automatically on every push to your default branch (i.e. every merge):
 
@@ -313,6 +327,12 @@ Run this job after every successful default-branch build. Hosted publication is 
 **"No non-expired SnapDrift baseline artifact was found"**  
 The baseline workflow has not completed successfully on `main`, or the artifact expired. With the Snap provider, the equivalent situation is a 404 from `/v1/visual/projects/:id/baselines/latest`; `SnapProvider` swallows that 404 and proceeds without a baseline — `onUnavailable` is **not** consulted for this case (a 404 is the legitimate "no baseline yet" signal, not a Snap outage). If you want the PR pipeline to tolerate the first-run case, set `diff.mode: "report-only"`; `onUnavailable: "warn-and-skip"` will not help here.
 
+**"Unable to resolve the SnapDrift baseline artifact"**
+GitHub failed while listing workflow runs or artifacts. Check the job's `actions: read` permission,
+repository/workflow/branch inputs, and GitHub API availability. Snap hosted diffs can still use the
+hosted comparison path, but local comparisons and `fallback-local` require a successful GitHub
+artifact lookup.
+
 **403 when posting the PR report**  
 Grant `issues: write` and `pull-requests: write` to the job.
 
@@ -320,10 +340,52 @@ Grant `issues: write` and `pull-requests: write` to the job.
 The Snap client never retries 4xx and never falls back, even when `onUnavailable` is set. Inspect the response body — the most common cause is a project-id mismatch between `GITHUB_REPOSITORY` (auto-derived) and the project's id on Snap.
 
 **Screenshots have different dimensions**  
-SnapDrift reports this as a dimension shift and skips pixel comparison for that route. Refresh the baseline after the change lands.
+SnapDrift compares the top-left-aligned union canvas, records the route in
+`changed[]`, and writes a local diff PNG. Refresh the baseline after an
+intentional change when you want future runs to return to equal-size
+comparisons.
 
 **A route appears in `errors[]`**  
 Capture failed before comparison. Confirm the app is fully ready and reachable before SnapDrift runs.
 
+**`comparison_too_large` or `union canvas ... exceeds the maximum`**
+
+The baseline/current screenshot union is larger than the 33,554,432-pixel
+comparison budget. Because captures are full-page, a short configured viewport
+can still produce an oversized image when the document is tall; the named
+`mobile` preset also renders at device scale factor 3. Inspect the actual image
+dimensions in the capture results or manifest and calculate
+`max(baselineWidth, currentWidth) × max(baselineHeight, currentHeight)`.
+
+If the route does not need mobile device emulation, a custom viewport object uses
+scale factor 1 and can avoid unnecessary raster inflation. Otherwise reduce the
+captured content or fixture height, or split the coverage across routes when
+appropriate. Do not resize/crop images or lower `diff.threshold`; neither changes
+the capture budget and either can hide a layout regression. See the [screenshot
+size budget](contracts.md#screenshot-size-budget) for the preset estimates and
+custom-viewport semantics.
+
 **Playwright install runs even though `provider: "snap"`**  
 That's expected for the Snap local-capture hybrid. Playwright runs locally to render the page, then the resulting screenshot is uploaded to Snap. The hybrid kicks in only when `baseUrl` points to a local address; for remote `baseUrl` Snap's render worker captures directly.
+
+
+## TypeScript package consumers
+
+Import APIs and types from the public `@snapdrift/*` package names. Their export
+maps support Bundler, Node16, and NodeNext resolution; enable `strict: true` and
+`skipLibCheck: false` to validate the contracts in your project. For Node16 or
+NodeNext, use `"type": "module"` or an `.mts` entrypoint. Install `typescript` and
+`@types/node` as development dependencies when using the Node buffer APIs.
+
+No TypeScript path aliases or imports into workspace source directories are
+needed. Root `snapdrift/lib/*` subpath typing is separate from these workspace
+contracts. The fixes become available to registry consumers after the packages
+are released and their installed versions are updated.
+
+The workspace packages are independently installable runtime packages. Install
+the package you use from the registry and let npm resolve its declared runtime
+dependencies; do not rely on a repository checkout or workspace links. The
+filesystem adapter includes its reporting dependency, so `@snapdrift/adapter-fs`
+can load config, capture, comparison, and report entrypoints from an isolated
+consumer. Release a new adapter version before expecting an existing registry
+installation to include a dependency correction.

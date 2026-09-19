@@ -7,6 +7,10 @@ import { jest } from '@jest/globals';
 import { PNG } from 'pngjs';
 
 const launchMock = jest.fn();
+const expectedContextSettings = {
+    locale: 'en-US', timezoneId: 'UTC', colorScheme: 'light', reducedMotion: 'no-preference',
+    forcedColors: 'none', javaScriptEnabled: true, serviceWorkers: 'allow'
+};
 
 jest.unstable_mockModule('playwright', () => ({
     chromium: {
@@ -14,7 +18,14 @@ jest.unstable_mockModule('playwright', () => ({
     }
 }));
 
+const originalConcurrency = process.env.SNAPDRIFT_CAPTURE_CONCURRENCY;
+process.env.SNAPDRIFT_CAPTURE_CONCURRENCY = '5';
 const { runBaselineCapture } = await import('../lib/capture-routes.mjs');
+if (originalConcurrency === undefined) {
+    delete process.env.SNAPDRIFT_CAPTURE_CONCURRENCY;
+} else {
+    process.env.SNAPDRIFT_CAPTURE_CONCURRENCY = originalConcurrency;
+}
 const {
     SNAPDRIFT_NAVIGATION_TIMEOUT_MS,
     SNAPDRIFT_SETTLE_DELAY_MS,
@@ -68,42 +79,51 @@ function createPage(behavior = {}, imageSize = { width: 10, height: 10 }) {
     };
 }
 
-function createHarness({ desktopPage, mobilePage, customPage = null }) {
-    const desktopContext = {
-        newPage: jest.fn().mockResolvedValue(desktopPage),
-        close: jest.fn().mockResolvedValue(undefined)
-    };
-    const mobileContext = {
-        newPage: jest.fn().mockResolvedValue(mobilePage),
-        close: jest.fn().mockResolvedValue(undefined)
-    };
-
-    const newContextMock = jest.fn()
-        .mockResolvedValueOnce(desktopContext)
-        .mockResolvedValueOnce(mobileContext);
-
-    let customContext = null;
-    if (customPage !== null) {
-        customContext = {
-            newPage: jest.fn().mockResolvedValue(customPage),
-            close: jest.fn().mockResolvedValue(undefined)
-        };
-        newContextMock.mockResolvedValueOnce(customContext);
-    }
-
+function createHarness({ desktopPage, mobilePage, customPage, pageFactory } = {}) {
+    const contexts = [];
     const browser = {
-        newContext: newContextMock,
+        version: () => '149.0.0.1',
+        newContext: jest.fn(async (options) => {
+            const storage = new Map();
+            const pages = [];
+            const context = {
+                options,
+                storage,
+                pages,
+                newPage: jest.fn(async () => {
+                    const preset = Object.keys(SNAPDRIFT_VIEWPORT_PRESETS).find((name) => {
+                        const { width, height } = SNAPDRIFT_VIEWPORT_PRESETS[name];
+                        return options.viewport.width === width && options.viewport.height === height;
+                    });
+                    const behavior = preset === 'desktop' ? desktopPage : preset === 'mobile' ? mobilePage : customPage;
+                    const page = pageFactory ? await pageFactory(options, storage) : (behavior || createPage());
+                    pages.push(page);
+                    return page;
+                }),
+                close: jest.fn().mockResolvedValue(undefined)
+            };
+            contexts.push(context);
+            return context;
+        }),
         close: jest.fn().mockResolvedValue(undefined)
     };
 
     launchMock.mockResolvedValue(browser);
 
-    return {
-        browser,
-        desktopContext,
-        mobileContext,
-        customContext
-    };
+    return { browser, contexts };
+}
+
+function expectContextsClosed(contexts, browser) {
+    expect(new Set(contexts).size).toBe(contexts.length);
+    for (const context of contexts) {
+        expect(context.newPage).toHaveBeenCalledTimes(1);
+        expect(context.close).toHaveBeenCalledTimes(1);
+        expect(context.close.mock.invocationCallOrder[0]).toBeLessThan(browser.close.mock.invocationCallOrder[0]);
+        for (const page of context.pages) {
+            expect(page.close).not.toHaveBeenCalled();
+        }
+    }
+    expect(browser.close).toHaveBeenCalledTimes(1);
 }
 
 describe('runBaselineCapture', () => {
@@ -131,7 +151,7 @@ describe('runBaselineCapture', () => {
         await fs.rm(tempDir, { recursive: true, force: true });
     });
 
-    it('captures selected routes, writes outputs, and configures both viewport contexts', async () => {
+    it('captures selected routes, writes outputs, and configures per-attempt viewport contexts', async () => {
         const routes = [
             { id: 'home-desktop', path: '/', viewport: 'desktop' },
             { id: 'home-mobile', path: '/', viewport: 'mobile' }
@@ -139,7 +159,7 @@ describe('runBaselineCapture', () => {
         const configPath = await writeConfig(tempDir, routes);
         const desktopPage = createPage({}, { width: 144, height: 126 });
         const mobilePage = createPage({}, { width: 39, height: 132 });
-        const { browser, desktopContext, mobileContext } = createHarness({ desktopPage, mobilePage });
+        const { browser, contexts } = createHarness({ desktopPage, mobilePage });
 
         const result = await runBaselineCapture({
             configPath,
@@ -153,6 +173,7 @@ describe('runBaselineCapture', () => {
 
         expect(launchMock).toHaveBeenCalledWith({ headless: true, args: ['--disable-gpu'] });
         expect(browser.newContext).toHaveBeenNthCalledWith(1, {
+            ...expectedContextSettings,
             viewport: {
                 width: SNAPDRIFT_VIEWPORT_PRESETS.desktop.width,
                 height: SNAPDRIFT_VIEWPORT_PRESETS.desktop.height
@@ -162,6 +183,7 @@ describe('runBaselineCapture', () => {
             hasTouch: SNAPDRIFT_VIEWPORT_PRESETS.desktop.hasTouch
         });
         expect(browser.newContext).toHaveBeenNthCalledWith(2, {
+            ...expectedContextSettings,
             viewport: {
                 width: SNAPDRIFT_VIEWPORT_PRESETS.mobile.width,
                 height: SNAPDRIFT_VIEWPORT_PRESETS.mobile.height
@@ -187,6 +209,24 @@ describe('runBaselineCapture', () => {
             expect.objectContaining({ id: 'home-desktop', width: 144, height: 126 }),
             expect.objectContaining({ id: 'home-mobile', width: 39, height: 132 })
         ]));
+        expect(manifest.captureProfile).toMatchObject({
+            schemaVersion: 2,
+            engine: { name: 'snapdrift-local', version: expect.any(String) },
+            engineVersion: expect.any(String),
+            browser: 'chromium',
+            browserRevision: '149.0.0.1',
+            playwrightVersion: expect.stringMatching(/^\d+\./),
+            platform: { name: os.platform(), architecture: os.arch(), release: os.release(), version: os.version() },
+            locale: 'en-US', timezone: 'UTC',
+            settings: {
+                screenshot: { fullPage: true, animations: 'disabled', caret: 'hide', scale: 'device', omitBackground: false, type: 'png' },
+                readiness: { waitUntil: 'load', settleDelayMs: SNAPDRIFT_SETTLE_DELAY_MS },
+                context: { isolation: 'fresh-context-per-attempt' },
+                launch: { headless: true, args: ['--disable-gpu'] }
+            }
+        });
+        expect(manifest.captureProfile.engineVersion).toBe(manifest.captureProfile.engine.version);
+        expect(desktopPage.screenshot).toHaveBeenCalledWith({ path: desktopShot, ...manifest.captureProfile.settings.screenshot });
         expect(manifest.screenshots.map((entry) => entry.id)).toEqual(['home-desktop', 'home-mobile']);
         expect(manifest.screenshots).toEqual(expect.arrayContaining([
             expect.objectContaining({ id: 'home-desktop', width: 144, height: 126 }),
@@ -194,9 +234,134 @@ describe('runBaselineCapture', () => {
         ]));
         expect((await fs.readFile(desktopShot)).length).toBeGreaterThan(0);
         expect((await fs.readFile(mobileShot)).length).toBeGreaterThan(0);
-        expect(desktopContext.close).toHaveBeenCalledTimes(1);
-        expect(mobileContext.close).toHaveBeenCalledTimes(1);
+        expect(browser.newContext).toHaveBeenCalledTimes(2);
+        expectContextsClosed(contexts, browser);
+    });
+
+    it.each(['desktop', 'mobile', { width: 800, height: 600 }])('isolates storage between concurrent routes sharing viewport %j', async (viewport) => {
+        const configPath = await writeConfig(tempDir, [
+            { id: 'writer', path: '/writer', viewport },
+            { id: 'reader', path: '/reader', viewport }
+        ]);
+        let releaseReader;
+        const written = new Promise((resolve) => { releaseReader = resolve; });
+        const { browser, contexts } = createHarness({
+            pageFactory: (options, storage) => {
+                const imageSize = { width: 10, height: 10 };
+                return createPage({
+                    goto: jest.fn(async (url) => {
+                        if (url.endsWith('/writer')) {
+                            storage.set('recent', 'tool');
+                            releaseReader();
+                        } else {
+                            await written;
+                            imageSize.height = storage.has('recent') ? 54 : 10;
+                        }
+                    })
+                }, imageSize);
+            }
+        });
+
+        const result = await runBaselineCapture({ configPath });
+        const results = JSON.parse(await fs.readFile(result.resultsPath, 'utf8'));
+
+        expect(results.passed).toBe(true);
+        expect(results.routes.find((route) => route.id === 'reader').height).toBe(10);
+        expect(contexts).toHaveLength(2);
+        expectContextsClosed(contexts, browser);
+    });
+
+    it('retries failed captures in a fresh context so storage from the failed attempt does not leak', async () => {
+        const configPath = await writeConfig(tempDir, [
+            { id: 'flaky', path: '/flaky', viewport: 'desktop' }
+        ]);
+        let attempt = 0;
+        const { browser, contexts } = createHarness({
+            pageFactory: (options, storage) => {
+                attempt += 1;
+                const currentAttempt = attempt;
+                const imageSize = { width: 10, height: 10 };
+                return createPage({
+                    goto: jest.fn(async () => {
+                        const leaked = storage.has('recent');
+                        if (currentAttempt === 1) {
+                            storage.set('recent', 'tool');
+                            throw new Error('Navigation timeout');
+                        }
+                        imageSize.height = leaked ? 54 : 10;
+                    })
+                }, imageSize);
+            }
+        });
+
+        const result = await runBaselineCapture({ configPath, routeIds: ['flaky'] });
+        const results = JSON.parse(await fs.readFile(result.resultsPath, 'utf8'));
+
+        expect(results.passed).toBe(true);
+        expect(results.routes[0]).toEqual(expect.objectContaining({
+            id: 'flaky',
+            status: 'passed',
+            width: 10,
+            height: 10
+        }));
+        expect(contexts).toHaveLength(2);
+        expect(contexts[0].storage.get('recent')).toBe('tool');
+        expect(contexts[1].storage.size).toBe(0);
+        expect(contexts[1].pages[0].goto).toHaveBeenCalledTimes(1);
+        expectContextsClosed(contexts, browser);
+    });
+
+    it('marks routes as failed without crashing when browser.newContext rejects, and closes the browser', async () => {
+        const configPath = await writeConfig(tempDir, [
+            { id: 'home-desktop', path: '/', viewport: 'desktop' }
+        ]);
+        const browser = {
+            version: () => '149.0.0.1',
+            newContext: jest.fn().mockRejectedValue(new Error('context quota exceeded')),
+            close: jest.fn().mockResolvedValue(undefined)
+        };
+        launchMock.mockResolvedValue(browser);
+
+        await expect(runBaselineCapture({ configPath, routeIds: ['home-desktop'] }))
+            .rejects.toThrow('SnapDrift capture failed for 1 route(s).');
+
+        const results = JSON.parse(await fs.readFile(path.join(tempDir, 'qa-artifacts', 'snapdrift', 'baseline', 'current', 'results.json'), 'utf8'));
+        expect(results.passed).toBe(false);
+        expect(results.routes).toEqual([
+            expect.objectContaining({
+                id: 'home-desktop',
+                status: 'failed',
+                error: 'context quota exceeded'
+            })
+        ]);
+        expect(browser.newContext).toHaveBeenCalledTimes(2);
         expect(browser.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes the context when context.newPage rejects, and retries in a fresh context', async () => {
+        const configPath = await writeConfig(tempDir, [
+            { id: 'home-desktop', path: '/', viewport: 'desktop' }
+        ]);
+        const { browser, contexts } = createHarness({
+            pageFactory: async () => {
+                throw new Error('page crashed on open');
+            }
+        });
+
+        await expect(runBaselineCapture({ configPath, routeIds: ['home-desktop'] }))
+            .rejects.toThrow('SnapDrift capture failed for 1 route(s).');
+
+        const results = JSON.parse(await fs.readFile(path.join(tempDir, 'qa-artifacts', 'snapdrift', 'baseline', 'current', 'results.json'), 'utf8'));
+        expect(results.passed).toBe(false);
+        expect(results.routes).toEqual([
+            expect.objectContaining({
+                id: 'home-desktop',
+                status: 'failed',
+                error: 'page crashed on open'
+            })
+        ]);
+        expect(contexts).toHaveLength(2);
+        expectContextsClosed(contexts, browser);
     });
 
     it('sanitizes route id before using it as a filename, stripping path-traversal sequences', async () => {
@@ -220,6 +385,19 @@ describe('runBaselineCapture', () => {
         expect(screenshotPath.startsWith(result.screenshotsRoot)).toBe(true);
     });
 
+    it('rejects colliding sanitized route ids before launching the browser or creating output', async () => {
+        const routes = [
+            { id: 'a/b', path: '/', viewport: 'desktop' },
+            { id: 'a_b', path: '/about', viewport: 'mobile' }
+        ];
+        const configPath = await writeConfig(tempDir, routes);
+
+        await expect(runBaselineCapture({ configPath, routeIds: ['a/b'] }))
+            .rejects.toThrow(/screenshots\/a_b\.png.*Rename.*recapture/);
+        expect(launchMock).not.toHaveBeenCalled();
+        await expect(fs.access(path.join(tempDir, 'qa-artifacts'))).rejects.toThrow();
+    });
+
     it('uses SNAPDRIFT_ROUTE_IDS when explicit routeIds are omitted', async () => {
         const routes = [
             { id: 'home-desktop', path: '/', viewport: 'desktop' },
@@ -228,7 +406,7 @@ describe('runBaselineCapture', () => {
         const configPath = await writeConfig(tempDir, routes);
         const desktopPage = createPage();
         const mobilePage = createPage();
-        const { desktopContext, mobileContext } = createHarness({ desktopPage, mobilePage });
+        const { browser, contexts } = createHarness({ desktopPage, mobilePage });
 
         process.env.SNAPDRIFT_ROUTE_IDS = 'home-mobile';
 
@@ -238,8 +416,11 @@ describe('runBaselineCapture', () => {
         expect(result.selectedRouteIds).toEqual(['home-mobile']);
         expect(results.routes).toHaveLength(1);
         expect(results.routes[0].id).toBe('home-mobile');
-        expect(desktopContext.newPage).not.toHaveBeenCalled();
-        expect(mobileContext.newPage).toHaveBeenCalledTimes(1);
+        expect(contexts).toHaveLength(1);
+        expect(contexts[0].options.viewport).toEqual({ width: 390, height: 844 });
+        expect(desktopPage.goto).not.toHaveBeenCalled();
+        expect(mobilePage.goto).toHaveBeenCalledTimes(1);
+        expectContextsClosed(contexts, browser);
     });
 
     it('captures multiple routes per viewport concurrently and preserves original ordering', async () => {
@@ -252,9 +433,20 @@ describe('runBaselineCapture', () => {
             { id: 'page-c', path: '/c', viewport: 'desktop' }
         ];
         const configPath = await writeConfig(tempDir, routes);
-        const desktopPage = createPage({}, { width: 20, height: 30 });
-        const mobilePage = createPage({}, { width: 10, height: 15 });
-        const { desktopContext, mobileContext } = createHarness({ desktopPage, mobilePage });
+        let releaseFirst;
+        const otherRoutesStarted = new Promise((resolve) => { releaseFirst = resolve; });
+        const started = [];
+        const goto = jest.fn(async (url) => {
+            started.push(url);
+            if (started.length === routes.length) releaseFirst();
+            if (url.endsWith('/a')) await otherRoutesStarted;
+        });
+        const { browser, contexts } = createHarness({
+            pageFactory: (options) => createPage(
+                { goto },
+                options.viewport.width === 1440 ? { width: 20, height: 30 } : { width: 10, height: 15 }
+            )
+        });
 
         const result = await runBaselineCapture({
             configPath,
@@ -264,9 +456,11 @@ describe('runBaselineCapture', () => {
         const results = JSON.parse(await fs.readFile(result.resultsPath, 'utf8'));
         const manifest = JSON.parse(await fs.readFile(result.manifestPath, 'utf8'));
 
-        // Both desktop routes captured by desktopContext, one mobile by mobileContext
-        expect(desktopContext.newPage).toHaveBeenCalledTimes(2);
-        expect(mobileContext.newPage).toHaveBeenCalledTimes(1);
+        expect(contexts).toHaveLength(3);
+        expect(contexts.filter(({ options }) => options.viewport.width === 1440)).toHaveLength(2);
+        expect(contexts.filter(({ options }) => options.viewport.width === 390)).toHaveLength(1);
+        expect(new Set(contexts.flatMap(({ pages }) => pages)).size).toBe(3);
+        expectContextsClosed(contexts, browser);
 
         // All 3 routes captured successfully
         expect(results.passed).toBe(true);
@@ -277,7 +471,7 @@ describe('runBaselineCapture', () => {
         expect(manifest.screenshots.map((s) => s.id)).toEqual(['page-a', 'page-b', 'page-c']);
 
         // Correct viewports recorded per route
-        expect(results.routes[0]).toEqual(expect.objectContaining({ id: 'page-a', viewport: 'desktop' }));
+        expect(results.routes[0]).toEqual(expect.objectContaining({ id: 'page-a', viewport: 'desktop', width: 20, height: 30 }));
         expect(results.routes[1]).toEqual(expect.objectContaining({ id: 'page-b', viewport: 'mobile' }));
         expect(results.routes[2]).toEqual(expect.objectContaining({ id: 'page-c', viewport: 'desktop' }));
     });
@@ -285,32 +479,24 @@ describe('runBaselineCapture', () => {
     it('captures a route with a custom object viewport using the specified dimensions', async () => {
         const routes = [{ id: 'tablet-view', path: '/tablet', viewport: { width: 800, height: 600 } }];
         const configPath = await writeConfig(tempDir, routes);
-        const desktopPage = createPage();
-        const mobilePage = createPage();
-        const customPage = createPage();
-        const { browser, desktopContext, mobileContext, customContext } = createHarness({ desktopPage, mobilePage, customPage });
+        const customPage = createPage({}, { width: 800, height: 600 });
+        const { browser, contexts } = createHarness({ customPage });
 
         const result = await runBaselineCapture({ configPath, routeIds: ['tablet-view'] });
         const results = JSON.parse(await fs.readFile(result.resultsPath, 'utf8'));
         const manifest = JSON.parse(await fs.readFile(result.manifestPath, 'utf8'));
 
-        // Preset contexts created first (calls 1 & 2), custom context created on demand (call 3)
-        expect(browser.newContext).toHaveBeenCalledTimes(3);
-        expect(browser.newContext).toHaveBeenNthCalledWith(3, {
+        expect(browser.newContext).toHaveBeenCalledTimes(1);
+        expect(browser.newContext).toHaveBeenCalledWith({
+            ...expectedContextSettings,
             viewport: { width: 800, height: 600 },
             deviceScaleFactor: 1,
             isMobile: false,
             hasTouch: false
         });
-        // Preset contexts opened but never used for this route
-        expect(desktopContext.newPage).not.toHaveBeenCalled();
-        expect(mobileContext.newPage).not.toHaveBeenCalled();
-        expect(customContext.newPage).toHaveBeenCalledTimes(1);
-        // All three contexts closed in finally
-        expect(desktopContext.close).toHaveBeenCalledTimes(1);
-        expect(mobileContext.close).toHaveBeenCalledTimes(1);
-        expect(customContext.close).toHaveBeenCalledTimes(1);
-        expect(results.passed).toBe(true);
+        expect(contexts).toHaveLength(1);
+        expect(contexts[0].pages[0]).toBe(customPage);
+        expectContextsClosed(contexts, browser);
         expect(results.routes).toHaveLength(1);
         expect(results.routes[0]).toEqual(expect.objectContaining({
             id: 'tablet-view',
@@ -321,6 +507,26 @@ describe('runBaselineCapture', () => {
             id: 'tablet-view',
             viewport: { width: 800, height: 600 }
         }));
+    });
+
+    it('preserves profiles through capture, baseline staging, and comparison with full-page growth', async () => {
+        const { stageArtifacts } = await import('../lib/stage-artifacts.mjs');
+        const { generateDriftReport } = await import('../lib/compare-results.mjs');
+        const configPath = await writeConfig(tempDir, [{ id: 'home', path: '/', viewport: 'desktop' }]);
+        createHarness({ desktopPage: createPage({}, { width: 10, height: 10 }) });
+        const baseline = await runBaselineCapture({ configPath, outDir: path.join(tempDir, 'baseline') });
+        const bundleDir = path.join(tempDir, 'bundle');
+        await stageArtifacts({ artifactType: 'baseline', bundleDir, resultsPath: baseline.resultsPath, manifestPath: baseline.manifestPath, screenshotsDir: path.join(baseline.screenshotsRoot, 'screenshots') });
+        createHarness({ desktopPage: createPage({}, { width: 10, height: 20 }) });
+        const current = await runBaselineCapture({ configPath, outDir: path.join(tempDir, 'current') });
+        const { summary } = await generateDriftReport({
+            configPath, baselineResultsPath: path.join(bundleDir, 'results.json'), baselineManifestPath: path.join(bundleDir, 'manifest.json'),
+            currentResultsPath: current.resultsPath, currentManifestPath: current.manifestPath, baselineRunDir: bundleDir, currentRunDir: current.screenshotsRoot
+        });
+        expect(summary.captureCompatibility).toEqual({ status: 'verified' });
+        expect(summary.errors).toEqual([]);
+        expect(summary.status).toBe('changes-detected');
+        expect(summary.changed[0].comparison.dimensionsChanged).toBe(true);
     });
 
     it('writes outputs into outDir when outDir is provided', async () => {
@@ -355,7 +561,7 @@ describe('runBaselineCapture', () => {
         const configPath = await writeConfig(tempDir, routes);
         const fastPage = createPage({}, { width: 10, height: 10 });
         const slowPage = createPage({}, { width: 10, height: 10 });
-        const { desktopContext, mobileContext } = createHarness({ desktopPage: fastPage, mobilePage: slowPage });
+        const { browser, contexts } = createHarness({ desktopPage: fastPage, mobilePage: slowPage });
 
         await runBaselineCapture({ configPath, routeIds: routes.map((r) => r.id) });
 
@@ -367,8 +573,8 @@ describe('runBaselineCapture', () => {
             waitUntil: 'load',
             timeout: SNAPDRIFT_NAVIGATION_TIMEOUT_MS
         });
-        expect(desktopContext.newPage).toHaveBeenCalledTimes(1);
-        expect(mobileContext.newPage).toHaveBeenCalledTimes(1);
+        expect(contexts).toHaveLength(2);
+        expectContextsClosed(contexts, browser);
     });
 
     it('writes results and manifest before throwing when one or more captures fail', async () => {
@@ -378,7 +584,7 @@ describe('runBaselineCapture', () => {
             goto: jest.fn().mockRejectedValue(new Error('Navigation timeout'))
         });
         const mobilePage = createPage();
-        const { browser, desktopContext, mobileContext } = createHarness({ desktopPage, mobilePage });
+        const { browser, contexts } = createHarness({ desktopPage, mobilePage });
         const resultsPath = path.join(tempDir, 'qa-artifacts', 'snapdrift', 'baseline', 'current', 'results.json');
         const manifestPath = path.join(tempDir, 'qa-artifacts', 'snapdrift', 'baseline', 'current', 'manifest.json');
 
@@ -401,10 +607,8 @@ describe('runBaselineCapture', () => {
             })
         ]);
         expect(manifest.screenshots).toEqual([]);
-        // Each capture attempt opens and closes a page; retry adds one extra attempt.
-        expect(desktopPage.close).toHaveBeenCalledTimes(2);
-        expect(desktopContext.close).toHaveBeenCalledTimes(1);
-        expect(mobileContext.close).toHaveBeenCalledTimes(1);
+        expect(contexts).toHaveLength(2);
+        expectContextsClosed(contexts, browser);
         expect(browser.close).toHaveBeenCalledTimes(1);
     });
 });

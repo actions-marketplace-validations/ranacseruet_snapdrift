@@ -3,8 +3,13 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { jest } from '@jest/globals';
 
-const { createProvider, LocalProvider } = await import('../lib/provider.mjs');
+const adapterFs = await import('@snapdrift/adapter-fs');
+const runBaselineCapture = jest.fn();
+jest.unstable_mockModule('@snapdrift/adapter-fs', () => ({ ...adapterFs, runBaselineCapture }));
+
+const { createProvider, LocalProvider, providerSupports, PROVIDER_CAPABILITIES } = await import('../lib/provider.mjs');
 const { SnapProvider } = await import('../lib/snap-provider.mjs');
 const { buildReportCommentBody } = await import('@snapdrift/adapter-report-md');
 const { validateSnapdriftConfig, VALID_PROVIDER_VALUES, VALID_ON_UNAVAILABLE_MODES } = await import('@snapdrift/manifest');
@@ -23,6 +28,27 @@ const validBase = {
 // ---------------------------------------------------------------------------
 // createProvider
 // ---------------------------------------------------------------------------
+
+describe('providerSupports', () => {
+  it.each(['capture', 'diff', 'publishBaseline', 'buildCommentBody'])('supports %s on both providers', (capability) => {
+    expect(providerSupports('local', capability)).toBe(true);
+    expect(providerSupports('snap', capability)).toBe(true);
+  });
+
+  it('distinguishes hosted baseline storage without constructing providers', () => {
+    expect(providerSupports('local', 'fetchLatestBaseline')).toBe(false);
+    expect(providerSupports('snap', 'fetchLatestBaseline')).toBe(true);
+    expect(PROVIDER_CAPABILITIES.local.fetchLatestBaseline).toBe(false);
+    expect(Object.isFrozen(PROVIDER_CAPABILITIES)).toBe(true);
+    expect(Object.isFrozen(PROVIDER_CAPABILITIES.snap)).toBe(true);
+  });
+
+  it.each([
+    ['unknown', 'capture'], ['local', 'unknown'], ['toString', 'capture'], ['local', 'toString'], ['__proto__', 'capture']
+  ])('rejects unknown capabilities: %s/%s', (provider, capability) => {
+    expect(providerSupports(provider, capability)).toBe(false);
+  });
+});
 
 describe('createProvider', () => {
   it('returns a LocalProvider for "local"', () => {
@@ -63,6 +89,21 @@ describe('createProvider', () => {
 // ---------------------------------------------------------------------------
 
 describe('LocalProvider', () => {
+  it('returns local artifact capabilities without mutating the adapter capture result', async () => {
+    const captured = Object.freeze({
+      resultsPath: '/tmp/local/results.json', manifestPath: '/tmp/local/manifest.json',
+      screenshotsRoot: '/tmp/local', selectedRouteIds: ['home']
+    });
+    runBaselineCapture.mockResolvedValueOnce(captured);
+    const options = { configPath: '/tmp/config.json', routeIds: ['home'] };
+    const result = await new LocalProvider().capture(options);
+    expect(runBaselineCapture).toHaveBeenCalledWith(options);
+    expect(result).toEqual({
+      ...captured, artifacts: { localScreenshots: true, artifactsRoot: captured.screenshotsRoot }
+    });
+    expect(captured).not.toHaveProperty('artifacts');
+  });
+
   it('exposes capture, diff, publishBaseline, fetchLatestBaseline, buildCommentBody methods', () => {
     const provider = new LocalProvider();
     expect(typeof provider.capture).toBe('function');

@@ -2,9 +2,218 @@
 
 ## Unreleased
 
+### Refactoring
+
+- GitHub-script steps in `actions/scope`, `actions/pr-diff` (scope and PR report),
+  and `actions/comment` now delegate to the shared, dependency-injected helpers in
+  `lib/github-requests.mjs` (`fetchPullRequestFiles`, `resolveScopeDecision`,
+  `resolvePullRequestScope`, `upsertPullRequestReportComment`), so the changed-file
+  selection and comment-upsert behavior is defined once and exercised by unit and
+  real-YAML parity tests. Outputs, reasons, warnings, markers, and fallback bodies
+  are byte-for-byte identical.
+- Providers and `captureWithPolicy`/`diffWithPolicy` results now include an explicit
+  `artifacts` descriptor (`describeCaptureArtifacts`: `localScreenshots` plus
+  `artifactsRoot` for local or hosted local-capture hybrid runs). Fallback decisions
+  prefer provider-returned capabilities, with provider-name/URL inference retained
+  for legacy results and explicit caller overrides taking precedence. Diff callers
+  without capability information or config retain the no-recapture legacy default.
+  `localScreenshots` remains, and
+  `hasLocalScreenshots` is kept as a thin wrapper. `lib/provider.mjs` exports
+  `PROVIDER_CAPABILITIES` and `providerSupports(provider, capability)` so the
+  unavailable `LocalProvider.fetchLatestBaseline` baseline-store capability is
+  discoverable without a runtime throw.
+
+### Features
+
+- Local manifests now persist capture profile v2: engine, browser/Playwright, OS,
+  locale/timezone, and rendering settings. Local comparison validates manifests,
+  requires exact v2 profile equality, and checks configured route paths and
+  normalized viewports before reading PNGs. Incompatibilities are
+  `incompatible_capture` errors, not product drift from changed image dimensions;
+  the summary's `captureCompatibility` status describes profiles only.
+- Legacy missing/v1 profiles remain unverified and pixel-comparable after route
+  checks unless shared metadata conflicts or an explicit foreign engine is found.
+  The unverified diagnostic appears in CLI, Markdown, and HTML reports as well as
+  JSON summaries and PR comments. Malformed or unsupported profiles are rejected.
+  Refresh using `snapdrift baseline`
+  (`provider: "local"`) or the existing baseline action; `report-only` acknowledges
+  incompatibility nonblockingly but never bypasses it to compare pixels.
+
+### Behavior changes
+
+- Local capture explicitly sets `en-US` / `UTC`; localized text/date changes may
+  require baseline recapture. Fonts are not fingerprinted. See the
+  [capture profile contract](docs/contracts.md#local-capture-profile-v2) and
+  [baseline refresh guide](docs/local-cli.md#refreshing-or-acknowledging-local-baselines).
+
+### Fixes
+
+- Isolate each local route capture and retry in a fresh browser context, preventing
+  cookies and browser storage from leaking between routes sharing a viewport.
+  Per-viewport concurrency and result ordering are preserved. This also fixes
+  Snap local-capture hybrid runs; recapture baselines affected by leaked storage.
+
+## 0.12.0 - 2026-09-16
+
+### Fixes
+
+- **PR comments no longer render `[object Object]` for a viewport.** A viewport is
+  either a preset name or a `{ width, height }` object, and the PR-comment renderer
+  stringified it directly. Hosted diff runs always build the object form, so every
+  hosted report printed the useless placeholder in its Error, Drift signals, and
+  Dimension shifts tables. All three report renderers now share one
+  `formatViewport` helper (exported from `@snapdrift/adapter-report-md`).
+
+### Features
+
+- **`compareImages` accepts a per-call `maxPixels` union-canvas ceiling.**
+  `MAX_COMPARISON_PIXELS` (32 Mi) is a *process memory* bound, not an algorithm
+  property, so callers with a larger envelope — a dedicated diff Lambda — can raise
+  it while callers sharing a small host keep the default. A missing, non-positive,
+  or non-finite value falls back to the default, so the guard cannot be removed by
+  accident. The `ComparisonTooLargeError` message now reports the ceiling that was
+  actually exceeded.
+
+### Documentation
+
+- Document that `migrate-baselines --to snap` is unsupported and point to
+  `snapdrift baseline` as the supported way to seed a hosted project. The
+  integration guide still described the retired upload direction as a working
+  one-shot command, and the contracts reference documented its request body,
+  idempotency, and storage behavior as if it succeeded. Both contradicted the
+  CLI, which has failed the direction since 0.7.0 with a pointer to
+  `snapdrift baseline`.
+- Document the screenshot size budget's memory cost for `maxPixels` callers: the
+  comparison retains both decoded RGBA inputs plus the optional diff canvas, so the
+  floor is roughly 12 bytes per union pixel before PNG overhead (~32-35 measured end
+  to end), and the ceiling should be sized against a measured peak rather than that
+  arithmetic.
+
+### Workspace packages
+
+- `@snapdrift/adapter-report-md` 1.2.1 publishes the `[object Object]` viewport fix;
+  `@snapdrift/compare-core` 1.3.0 publishes the per-call `maxPixels` option and the
+  new size-budget guidance.
+- The root package's dependency floors move to `^1.2.1` (adapter-report-md) and
+  `^1.3.0` (compare-core) so `snapdrift` 0.12.0 actually requires those fixes. A
+  retained lockfile resolution of adapter-report-md 1.2.0 still satisfies `^1.2.0`,
+  so without the floor bump an upgrade of `snapdrift` alone could install the
+  unfixed report renderer.
+
+## 0.11.0 - 2026-09-14
+
+### Behavior changes
+
+- **Local comparisons now always use comparison policy v1.** `generateDriftReport`
+  synthesizes `{ "version": 1, "threshold": diff.threshold }` when neither the
+  caller nor `diff.comparisonPolicy` supplies a policy, matching the CLI and both
+  providers. Dimension mismatches are now `changed[]` signals with union-canvas
+  metadata instead of `dimensionChanges[]` (which stays in the summary contract
+  but is empty for local comparisons). The strict same-dimension comparator
+  remains available to direct `@snapdrift/compare-core` / `comparePngs` callers
+  that pass no policy.
+
+### Performance
+
+- `compareImages` short-circuits byte-identical buffers and can skip rendering
+  the diff PNG via `renderDiffImage: false`; drift reports only render diff
+  images for changed routes and resolve/read route PNGs concurrently.
+- Union-canvas size limits are now checked against the PNG IHDR header before
+  decoding, so oversized images are rejected before allocating decoded buffers.
+
+### Fixes
+
+- `compareImages`, `generateDiffImage`, and `compareWithIgnoreRegions` now reject
+  malformed ignore regions and highlight colors instead of silently masking
+  nothing or coercing `undefined` channels.
+
+### Features
+
+- **Workspace packages** — publish `@snapdrift/compare-core` 1.2.0 and
+  `@snapdrift/adapter-fs` 1.3.0 with the new comparison options, validation, and
+  performance behavior. The new `renderDiffImage: false` option is surfaced
+  through a separate overload, so existing `compareImages` / `comparePngs`
+  callers keep a non-optional `diffImageBuffer` with no type or runtime change.
+
+### Documentation
+
+- Document the full-page screenshot pixel budget, viewport/device-scale
+  estimates, custom-viewport semantics, and remediation for
+  `comparison_too_large` failures.
+
+## 0.10.0 - 2026-09-10
+
+### Fixes
+
+- **PR diff artifacts remain reviewable from GitHub comments** — generated local
+  diff paths are now linked to the authenticated Actions artifact (or workflow
+  run fallback) instead of being emitted as broken relative image URLs. Hosted
+  legacy captures also retain their reported dimensions and pixel denominator
+  when v1 comparison metadata is absent.
+
+### Features
+
+- **Unequal-dimension comparisons** — `@snapdrift/compare-core` now exposes
+  `compareImages()` for top-left-aligned union-canvas comparisons while the
+  existing strict APIs remain unchanged. Updated local and hosted providers
+  explicitly request comparison policy v1, record comparison dimensions and the
+  geometric union denominator, stage a generated diff PNG, and render it in
+  Markdown, HTML, and PR reports. Low-level public adapter calls remain strict
+  unless they opt in with `diff.comparisonPolicy`. Legacy dimension shifts remain
+  in `dimensionChanges[]`; completed v1 dimension changes are `changed[]` signals
+  and do not fail `fail-on-incomplete` alone.
+
+- **Workspace packages** — publish `@snapdrift/manifest` 1.4.0,
+  `@snapdrift/compare-core` 1.1.0, `@snapdrift/adapter-report-md` 1.2.0, and
+  `@snapdrift/adapter-fs` 1.2.0 before activating the updated hosted Snap client.
+
+## 0.9.0 - 2026-09-09
+
+### Fixes
+
+- **Workspace packages now declare their runtime dependency boundaries** (#148).
+  `@snapdrift/adapter-fs` declares `@snapdrift/adapter-report-md`, and an isolated
+  packed-consumer gate imports every workspace package with only its declared
+  local dependency closure. Repository workspaces can no longer mask a missing
+  runtime dependency.
+
+- **Published workspace TypeScript contracts resolve under modern module resolution** (#135, #129). All four `@snapdrift/*` packages expose declarations through their export maps, include signatures for every public runtime export, and correct stale declaration references. Strict declaration checks and isolated packed-package consumer fixtures now run in CI.
+
+- **Snap transport now has enforceable request and operation deadlines** (#150). JSON requests
+  settle stalled headers or bodies within 30 seconds, binary exports within 120 seconds, and each
+  Snap operation shares a 10-minute budget across requests, retries, backoff, and polling. Aborted
+  or otherwise exhausted transport operations now reach the configured `onUnavailable` policy;
+  received 4xx responses remain immediate and non-retryable, while stalled 4xx diagnostics retain
+  their HTTP status with a timeout diagnostic.
+- **Renamed files now retain both paths during route scoping** (#149). The
+  `scope` and `pr-diff` actions include a nonempty `previous_filename` for
+  GitHub rename records, deduplicate the combined paths, and preserve the
+  existing force-run and lookup-fallback behavior (with explicit route ids
+  still taking precedence in `pr-diff`). If GitHub returns its 3,000-record
+  cap, both actions run all configured routes with reason
+  `changed_files_truncated` rather than trust an incomplete list. A file moved
+  out of a watched directory can no longer silently skip its route.
+- **Sanitized route-id collisions are rejected before writing screenshots** (#126). Local capture now fails before browser work, while Snap baseline export validates every source route after downloading the archive and before returning or writing screenshot files. Both paths share the same route-id sanitizer when distinct ids would map to one filename. Existing manifests with duplicate or flattening `imagePath` values also fail closed, including scoped comparisons; rename the conflicting ids and recapture the affected baseline. The published package floors move `@snapdrift/manifest` to 1.3.0 and `@snapdrift/adapter-fs` to 1.1.0 so consumers receive the shared helper.
+- **Baseline lookup failures no longer masquerade as missing artifacts** (#147). The baseline
+  resolver now reports `found`, `missing`, or `error`, fails standalone resolution on API/network/
+  malformed responses, and keeps the PR wrapper's hosted Snap path available while failing local
+  comparisons and local fallbacks when GitHub cannot provide the baseline. The existing intentional
+  first-run skipped summary remains limited to a successful lookup with no non-expired artifact.
+- **Hosted Snap diffs now fail closed on incomplete results** (#146). Hosted comparison now validates `purpose: "diff"`, the persisted run metadata, and expected route/viewport identities, polls until the expected capture set is available, verifies the returned run id and paths, and rejects duplicate, missing, pending, malformed, or invalid captures as `incomplete`. A diffed capture is counted only when both image objects and a finite numeric `diffPct` are present; older results without expected capture identities must be recaptured instead of being treated as clean.
+
+### Changed
+
+- **Standalone baseline resolution now fails on lookup errors** (#147). Consumers orchestrating
+  `actions/resolve-baseline` should handle its `resolution-status` output: `missing` is the
+  intentional first-baseline case, while `error` means the GitHub lookup could not be trusted and
+  fails the action. The PR wrapper keeps hosted Snap comparisons available and reports the status
+  through `baseline-resolution-status`.
+
 ### Chore
 
 - **The release workflow now fails when the root dispatcher's immutable pin predates wrapper changes** (#133). The Marketplace `action.yml` pins its inner `baseline` / `pr-diff` refs to an immutable commit SHA, but nothing detected when that pin went stale: between releases every change to `actions/baseline` or `actions/pr-diff` stayed invisible to consumers of the root action, so a release could ship bumped wrapper code while the dispatcher still executed old wrapper code at the pinned SHA. `npm run check:pin-stale` (new `scripts/check-pin-stale.mjs`) fails when the pinned SHA is older than the newest commit touching `actions/`. It runs in `publish.yml` (gated on a published release) rather than on every PR, because the pin is expected to lag wrapper changes on feature branches. The currently-stale pin in `action.yml` (which predated the #136 hosted-baseline fix) has been bumped to the latest `main` commit.
+
+- **Workspace patch releases ship previously-unpublished fixes.** `@snapdrift/compare-core` 1.0.1 and `@snapdrift/adapter-report-md` 1.1.1 publish the #154 and #158 changes that landed after 1.0.0 / 1.1.0 were already on npm; without new versions those fixes would not have shipped. `@snapdrift/manifest` 1.3.0 and `@snapdrift/adapter-fs` 1.1.0 publish for the first time in this release. Workflow examples in the README, Integration Guide, and baseline template now reference `@v0.9.0`.
 
 ## 0.8.2 - 2026-08-24
 

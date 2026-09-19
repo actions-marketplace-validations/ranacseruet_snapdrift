@@ -31,6 +31,25 @@ export interface VisualRegressionSelectionConfig {
   sharedExact?: string[];
 }
 
+/** Explicit opt-in to the top-left-aligned unequal-dimension comparison policy. */
+export interface ComparisonPolicy {
+  version: 1;
+  threshold: number;
+}
+
+export interface ComparisonDimensions {
+  width: number;
+  height: number;
+}
+
+export interface ComparisonMetadata {
+  baseline: ComparisonDimensions;
+  current: ComparisonDimensions;
+  canvas: ComparisonDimensions;
+  dimensionsChanged: boolean;
+  totalPixels: number;
+}
+
 export interface SnapConfig {
   /** Snap API base URL. Defaults to "https://snap.i2dev.com". */
   apiUrl?: string;
@@ -52,6 +71,13 @@ export interface VisualRegressionRouteConfig {
   navigationTimeout?: number;
 }
 
+export function sanitizeRouteId(id: string): string;
+export function assertUniqueRouteIdFilenames(
+  routeIds: Iterable<unknown>,
+  sourceLabel?: string,
+  extension?: string
+): void;
+
 export interface VisualRegressionConfig {
   baselineArtifactName: string;
   workingDirectory: string;
@@ -63,6 +89,7 @@ export interface VisualRegressionConfig {
   diff: {
     threshold: number;
     mode: 'report-only' | 'fail-on-changes' | 'fail-on-incomplete' | 'strict';
+    comparisonPolicy?: ComparisonPolicy;
   };
   selection?: VisualRegressionSelectionConfig;
   provider?: 'local' | 'snap';
@@ -96,6 +123,7 @@ export interface VisualScreenshotManifest {
   generatedAt: string;
   baseUrl: string;
   screenshots: VisualScreenshotManifestEntry[];
+  captureProfile?: ManifestCaptureProfile;
 }
 
 export interface VisualBaselineResults {
@@ -123,6 +151,38 @@ export interface CaptureProfile {
   locale?: string;
 }
 
+export interface LegacyEngineCaptureProfile extends Partial<CaptureProfile> {
+  schemaVersion?: number;
+  engine: { name: string; version?: string };
+}
+
+export interface LocalCaptureProfile extends CaptureProfile {
+  schemaVersion: 2;
+  engine: { name: 'snapdrift-local'; version: string };
+  browser: string;
+  browserRevision: string;
+  playwrightVersion: string;
+  locale: string;
+  timezone: string;
+  platform: { name: string; architecture: string; release: string; version: string };
+  settings: {
+    screenshot: { fullPage: boolean; animations: 'disabled' | 'allow'; caret: 'hide' | 'initial'; scale: 'css' | 'device'; omitBackground: boolean; type: 'png' };
+    readiness: { waitUntil: 'load' | 'domcontentloaded' | 'networkidle' | 'commit'; settleDelayMs: number };
+    context: { isolation: string; colorScheme: 'light' | 'dark' | 'no-preference'; reducedMotion: 'reduce' | 'no-preference'; forcedColors: 'active' | 'none'; javaScriptEnabled: boolean; serviceWorkers: 'allow' | 'block' };
+    launch: { headless: boolean; args: string[] };
+  };
+}
+
+export type ManifestCaptureProfile = CaptureProfile | LegacyEngineCaptureProfile | LocalCaptureProfile;
+export interface CaptureCompatibility {
+  status: 'verified' | 'unverified' | 'incompatible';
+  reason?: string;
+}
+export const CAPTURE_PROFILE_SCHEMA_VERSION: 2;
+export function validateCaptureProfile(value: unknown, sourceLabel?: string): ManifestCaptureProfile | undefined;
+export function checkCaptureProfileCompatibility(baseline?: ManifestCaptureProfile, current?: ManifestCaptureProfile): CaptureCompatibility;
+export function normalizedViewportIdentity(viewport: VisualViewport): string;
+
 export interface VisualDiffMissingItem {
   id: string;
   reason: string;
@@ -136,6 +196,7 @@ export interface VisualDiffErrorItem {
   path?: string;
   viewport?: VisualViewport;
   status: 'error';
+  code?: 'incompatible_capture';
   message: string;
 }
 
@@ -162,6 +223,10 @@ export interface VisualDiffChangedItem {
   totalPixels: number;
   mismatchRatio: number;
   status: 'changed';
+  /** Present for v1 union-canvas comparisons. */
+  comparison?: ComparisonMetadata;
+  /** Relative to the local diff output/artifact directory. */
+  diffImagePath?: string;
 }
 
 export interface VisualDiffSummary {
@@ -187,18 +252,30 @@ export interface VisualDiffSummary {
   changed: VisualDiffChangedItem[];
   missing: VisualDiffMissingItem[];
   errors: VisualDiffErrorItem[];
+  captureCompatibility?: CaptureCompatibility;
   dimensionChanges: VisualDiffDimensionItem[];
+  /** The exact policy used for v1 local comparisons, when opted in. */
+  comparisonPolicy?: ComparisonPolicy;
   message?: string;
   /** Link to the provider's run detail page. Set by SnapProvider during diff(); undefined for LocalProvider. Serialized into summary.json so the comment step can include it without re-creating the provider. */
   dashboardUrl?: string;
 }
+
+/** Informational summary written without a pixel comparison. */
+export interface VisualDriftStatusSummary extends Partial<VisualDiffSummary> {
+  status: 'skipped' | 'clean' | 'changes-detected' | 'incomplete';
+  reason: string;
+}
+
+/** Accepted by provider and markdown comment renderers. */
+export type VisualReportSummary = VisualDiffSummary | VisualDriftStatusSummary;
 
 /**
  * What a skipped run writes to `summary.json` — no diff was performed, so none
  * of the diff counters exist. Emitted by `buildDriftSummary` for scope skips,
  * missing baselines, and Snap outages. See docs/contracts.md § Skipped summary.
  */
-export interface VisualDriftSkippedSummary {
+export interface VisualDriftSkippedSummary extends VisualDriftStatusSummary {
   status: 'skipped';
   reason: string;
   message?: string;
@@ -214,7 +291,9 @@ export interface VisualDriftSkippedSummary {
 // Both take a partial summary because `actions/enforce` reads whatever
 // `summary.json` holds without narrowing it first, and shouldFailDriftCheck
 // additionally accepts the skipped shape, which it always passes.
-export function determineDriftStatus(summaryData: Partial<VisualDiffSummary>): 'clean' | 'changes-detected' | 'incomplete';
+export function determineDriftStatus(
+  summaryData: Partial<VisualDiffSummary>
+): 'clean' | 'changes-detected' | 'incomplete';
 export function shouldFailDriftCheck(summaryData: Partial<VisualDiffSummary> | VisualDriftSkippedSummary): boolean;
 
 // --- Provider abstraction ---
@@ -241,6 +320,7 @@ export interface ProviderCaptureResult {
   manifestPath: string;
   screenshotsRoot: string;
   selectedRouteIds: string[];
+  artifacts?: { localScreenshots: boolean; artifactsRoot?: string };
 }
 
 export interface ProviderDiffOptions {
@@ -254,6 +334,8 @@ export interface ProviderDiffOptions {
   currentRunDir?: string;
   baselineArtifactName?: string;
   baselineSourceSha?: string;
+  /** Explicit comparison contract selected by the provider. */
+  comparisonPolicy?: ComparisonPolicy;
 }
 
 export interface ProviderDiffResult {
@@ -291,6 +373,7 @@ export interface ProviderBaselineData {
 
 export interface ProviderCommentMeta {
   artifactName?: string;
+  artifactUrl?: string;
   runUrl?: string;
   dashboardUrl?: string;
   maxChangedRows?: number;
@@ -302,12 +385,13 @@ export interface VisualProvider {
   diff(options: ProviderDiffOptions): Promise<ProviderDiffResult>;
   publishBaseline(options: ProviderPublishBaselineOptions): Promise<ProviderPublishBaselineResult>;
   fetchLatestBaseline(options: ProviderFetchBaselineOptions): Promise<ProviderBaselineData | null>;
-  buildCommentBody(summary: VisualDiffSummary, meta?: ProviderCommentMeta): string;
+  buildCommentBody(summary: VisualReportSummary, meta?: ProviderCommentMeta): string;
 }
 
 // --- Config validation and route selection ---
 
-export const VALID_DIFF_MODES: string[];
+export const VALID_DIFF_MODES: readonly ['report-only', 'fail-on-changes', 'fail-on-incomplete', 'strict'];
+export const COMPARISON_POLICY_VERSION: 1;
 export const VALID_PROVIDER_VALUES: readonly ['local', 'snap'];
 export const VALID_ON_UNAVAILABLE_MODES: readonly ['fail', 'warn-and-skip', 'fallback-local'];
 export const SNAPDRIFT_NAVIGATION_TIMEOUT_MS: number;
@@ -316,5 +400,27 @@ export const SNAPDRIFT_SETTLE_DELAY_MS: number;
 export function splitCommaList(value: string | undefined): string[];
 export function validateSnapdriftConfig(value: unknown, sourceLabel?: string): VisualRegressionConfig;
 export function resolveFromWorkingDirectory(config: VisualRegressionConfig, relativePath: string): string;
-export function selectConfiguredRoutes(config: VisualRegressionConfig, requestedRouteIds: Iterable<string>): { routes: VisualRegressionRouteConfig[]; selectedRouteIds: string[] };
-export function selectRoutesForChangedFiles(config: VisualRegressionConfig, changedFiles: string[]): { shouldRun: boolean; reason: string; selectedRouteIds: string[] };
+export function selectConfiguredRoutes(
+  config: VisualRegressionConfig,
+  requestedRouteIds: Iterable<string>
+): { routes: VisualRegressionRouteConfig[]; selectedRouteIds: string[] };
+export function selectRoutesForChangedFiles(
+  config: VisualRegressionConfig,
+  changedFiles: string[]
+): { shouldRun: boolean; reason: string; selectedRouteIds: string[] };
+
+// --- Manifest schema and viewport helpers ---
+
+export const CURRENT_SCHEMA_VERSION: number;
+export function validateManifest(value: unknown, sourceLabel?: string): VisualScreenshotManifest;
+export function indexManifestEntries(
+  manifest: VisualScreenshotManifest,
+  selectedRouteIds: string[],
+  sourceLabel?: string
+): Map<string, VisualScreenshotManifestEntry>;
+export function indexRouteResults(results: VisualBaselineResults): Map<string, VisualBaselineRouteResult>;
+export const VIEWPORT_PRESETS: Record<VisualViewportPreset, Required<ViewportDescriptor>> & {
+  [name: string]: Required<ViewportDescriptor> | undefined;
+};
+export function viewportKey(viewport: VisualViewport): string;
+export function viewportHash(descriptor: ViewportDescriptor): string;

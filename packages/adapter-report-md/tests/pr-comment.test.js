@@ -1,10 +1,10 @@
 /** @jest-environment node */
 
 describe('buildReportCommentBody', () => {
-  let buildReportCommentBody, PR_COMMENT_MARKER, PR_COMMENT_MARKERS;
+  let buildReportCommentBody, escapeMarkdown, PR_COMMENT_MARKER, PR_COMMENT_MARKERS;
 
   beforeAll(async () => {
-    ({ buildReportCommentBody, PR_COMMENT_MARKER, PR_COMMENT_MARKERS } = await import('../src/pr-comment.mjs'));
+    ({ buildReportCommentBody, escapeMarkdown, PR_COMMENT_MARKER, PR_COMMENT_MARKERS } = await import('../src/pr-comment.mjs'));
   });
 
   const cleanSummary = {
@@ -23,6 +23,10 @@ describe('buildReportCommentBody', () => {
     const body = buildReportCommentBody(cleanSummary);
     expect(body.startsWith(PR_COMMENT_MARKER)).toBe(true);
     expect(PR_COMMENT_MARKERS).toEqual([PR_COMMENT_MARKER]);
+  });
+
+  it('escapes dynamic markdown and HTML delimiters', () => {
+    expect(escapeMarkdown('<b>`failure`</b> | [details] & more')).toBe('&lt;b&gt;\\`failure\\`&lt;/b&gt; \\| \\[details\\] &amp; more');
   });
 
   it('uses a concise high-signal metrics table', () => {
@@ -65,6 +69,65 @@ describe('buildReportCommentBody', () => {
     expect(body).toContain('<details><summary>Drift signals</summary>');
     expect(body).toContain('| Route | Viewport | Mismatch |');
     expect(body).toContain('| home-desktop | desktop | 5.23% |');
+  });
+
+  it('renders v1 dimensions and a staged diff path in drift details', () => {
+    const body = buildReportCommentBody({
+      ...cleanSummary,
+      status: 'changes-detected',
+      changedScreenshots: 1,
+      changed: [{
+        id: 'home-desktop',
+        viewport: 'desktop',
+        mismatchRatio: 0.1,
+        differentPixels: 10,
+        totalPixels: 100,
+        comparison: {
+          baseline: { width: 1440, height: 900 },
+          current: { width: 1440, height: 920 },
+          canvas: { width: 1440, height: 920 },
+          dimensionsChanged: true,
+          totalPixels: 1324800
+        },
+        diffImagePath: 'diffs/home-desktop.png'
+      }]
+    });
+
+    expect(body).toContain('| Dimension shifts | 1 |');
+    expect(body).toContain('| home-desktop | desktop | 1440×900 | 1440×920 | 1440×920 |');
+    expect(body).toContain('`diffs/home-desktop.png`');
+    expect(body).not.toContain('![Diff image]');
+    expect(body).toContain('pixel comparison included');
+    expect(body).not.toContain('comparison skipped');
+  });
+
+  it('links staged diff paths to the uploaded report artifact', () => {
+    const body = buildReportCommentBody(
+      {
+        ...cleanSummary,
+        status: 'changes-detected',
+        changedScreenshots: 1,
+        changed: [{
+          id: 'home-desktop',
+          viewport: 'desktop',
+          mismatchRatio: 0.1,
+          differentPixels: 10,
+          totalPixels: 100,
+          comparison: {
+            baseline: { width: 2, height: 1 },
+            current: { width: 3, height: 1 },
+            canvas: { width: 3, height: 1 },
+            dimensionsChanged: true,
+            totalPixels: 3
+          },
+          diffImagePath: 'diffs/home-desktop.png'
+        }]
+      },
+      { artifactUrl: 'https://github.com/example/repo/actions/runs/123/artifacts/456' }
+    );
+
+    expect(body).toContain('[View report artifacts →](https://github.com/example/repo/actions/runs/123/artifacts/456) `diffs/home-desktop.png`');
+    expect(body).not.toContain('![Diff image]');
   });
 
   it('truncates changed screenshots at 20 with overflow note', () => {
@@ -119,6 +182,72 @@ describe('buildReportCommentBody', () => {
     expect(body).toContain('<details><summary>Error details</summary>');
     expect(body).toContain('| Route | Viewport | Error |');
     expect(body).toContain('| home-desktop | desktop | Current capture failed: Navigation timeout |');
+  });
+
+  it('formats an object viewport as WxH in the error table instead of [object Object]', () => {
+    const body = buildReportCommentBody({
+      ...cleanSummary,
+      status: 'incomplete',
+      errors: [{
+        id: 'base64-converter-mobile',
+        viewport: { width: 390, height: 844 },
+        message: 'comparison_too_large'
+      }]
+    });
+    expect(body).not.toContain('[object Object]');
+    expect(body).toContain('| base64-converter-mobile | 390x844 | comparison_too_large |');
+  });
+
+  it('formats an object viewport as WxH in the drift signals table', () => {
+    const body = buildReportCommentBody({
+      ...cleanSummary,
+      status: 'changes-detected',
+      changedScreenshots: 1,
+      changed: [{ id: 'home-mobile', viewport: { width: 390, height: 844 }, mismatchRatio: 0.42 }]
+    });
+    expect(body).not.toContain('[object Object]');
+    expect(body).toContain('| home-mobile | 390x844 |');
+  });
+
+  it('formats an object viewport as WxH in the dimension shifts table', () => {
+    const body = buildReportCommentBody({
+      ...cleanSummary,
+      status: 'incomplete',
+      dimensionChanges: [{
+        id: 'home-mobile',
+        viewport: { width: 390, height: 844 },
+        baselineWidth: 1170,
+        baselineHeight: 23520,
+        currentWidth: 1170,
+        currentHeight: 23631
+      }]
+    });
+    expect(body).not.toContain('[object Object]');
+    expect(body).toContain('| home-mobile | 390x844 |');
+  });
+
+  it('formats an object viewport in the opted-in unequal-dimension shifts table', () => {
+    const body = buildReportCommentBody({
+      ...cleanSummary,
+      status: 'changes-detected',
+      changedScreenshots: 1,
+      changed: [{
+        id: 'home-mobile',
+        viewport: { width: 390, height: 844 },
+        mismatchRatio: 0.4,
+        differentPixels: 1,
+        totalPixels: 2,
+        comparison: {
+          baseline: { width: 1170, height: 23520 },
+          current: { width: 1170, height: 23631 },
+          canvas: { width: 1170, height: 23631 },
+          dimensionsChanged: true,
+          totalPixels: 27648270
+        }
+      }]
+    });
+    expect(body).not.toContain('[object Object]');
+    expect(body).toContain('| home-mobile | 390x844 |');
   });
 
   it('includes a branded metadata footer with artifact name, baseline info, and run link', () => {

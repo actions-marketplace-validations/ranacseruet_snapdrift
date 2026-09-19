@@ -44,6 +44,28 @@ describe('generateHtmlReport', () => {
     expect(html).toContain('>Comparison errors<');
   });
 
+  it('renders the unverified capture diagnostic once with HTML escaping', async () => {
+    const message = 'Capture compatibility is unverified: <legacy> & "v1".';
+    const html = await generateHtmlReport(makeSummary({
+      captureCompatibility: { status: 'unverified', reason: message },
+      message
+    }));
+    const escaped = 'Capture compatibility is unverified: &lt;legacy&gt; &amp; &quot;v1&quot;.';
+    expect(html.split(escaped)).toHaveLength(2);
+    expect(html).not.toContain(message);
+  });
+
+  it('does not render unrelated summary messages or empty diagnostics', async () => {
+    for (const status of [undefined, 'verified', 'incompatible', 'unverified']) {
+      const html = await generateHtmlReport(makeSummary({
+        captureCompatibility: status ? { status } : undefined,
+        message: status === 'unverified' ? undefined : 'Unrelated note'
+      }));
+      expect(html).not.toContain('Unrelated note');
+      expect(html).not.toContain('<strong>Note:</strong>');
+    }
+  });
+
   it('shows drift-detected status class and label', async () => {
     const html = await generateHtmlReport(makeSummary({ status: 'changes-detected' }));
     expect(html).toContain('status-changes');
@@ -110,6 +132,46 @@ describe('generateHtmlReport', () => {
     }));
     expect(html).toContain('1440&times;1266');
     expect(html).toContain('1440&times;1092');
+  });
+
+  it('renders v1 dimensions and embeds the staged diff image', async () => {
+    const imageReader = jest.fn().mockResolvedValue('diffBase64');
+    const html = await generateHtmlReport(makeSummary({
+      status: 'changes-detected',
+      changedScreenshots: 1,
+      changed: [{
+        id: 'home-desktop',
+        path: '/',
+        viewport: 'desktop',
+        baselineImagePath: 'baseline.png',
+        currentImagePath: 'current.png',
+        width: 1440,
+        height: 920,
+        differentPixels: 10,
+        totalPixels: 1324800,
+        mismatchRatio: 10 / 1324800,
+        status: 'changed',
+        comparison: {
+          baseline: { width: 1440, height: 900 },
+          current: { width: 1440, height: 920 },
+          canvas: { width: 1440, height: 920 },
+          dimensionsChanged: true,
+          totalPixels: 1324800
+        },
+        diffImagePath: 'diffs/home-desktop.png'
+      }]
+    }), {
+      baselineRunDir: '/tmp/baseline',
+      currentRunDir: '/tmp/current',
+      diffRunDir: '/tmp/diff',
+      imageReader
+    });
+
+    expect(imageReader).toHaveBeenCalledWith('/tmp/diff', 'diffs/home-desktop.png');
+    expect(html).toContain('1440&times;900');
+    expect(html).toContain('1440&times;920');
+    expect(html).toContain('data:image/png;base64,diffBase64');
+    expect(html).toContain('Diff image');
   });
 
   it('renders errors when present', async () => {

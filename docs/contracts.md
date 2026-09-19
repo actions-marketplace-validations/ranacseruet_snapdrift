@@ -22,7 +22,7 @@ SnapDrift reads runtime behavior from `.github/snapdrift.json` by default.
 
 | Field | Type | Description |
 |:------|:-----|:------------|
-| `id` | `string` | Unique route identifier across runs |
+| `id` | `string` | Unique route identifier across runs. Its sanitized screenshot filename must also be unique across the full configured route set. |
 | `path` | `string` | URL path appended to `baseUrl` |
 | `viewport` | `string` or `object` | Preset name (`"desktop"`, `"mobile"`) or a custom object `{ "width": number, "height": number }` |
 | `changePaths` | `string[]` | Optional prefixes used for changed-file scoping |
@@ -40,8 +40,27 @@ SnapDrift reads runtime behavior from `.github/snapdrift.json` by default.
 | `snap.apiKey` | `string` | Inline API key with `${VAR}` interpolation (mutually exclusive with `snap.apiKeyEnv`) |
 | `snap.projectId` | `string` | Snap project ID or `"auto"` (default: `"auto"`, derives from `GITHUB_REPOSITORY`) |
 | `snap.onUnavailable` | `string` | Behavior when Snap is unreachable: `"fail"` (default), `"warn-and-skip"`, or `"fallback-local"` |
+| `diff.comparisonPolicy` | `{ "version": 1, "threshold": number }` | Accepted for compatibility; comparison policy v1 is always applied when absent. `threshold` must match `diff.threshold` |
 
 When `provider: "snap"` is set, the `snap` block is required. Exactly one of `snap.apiKeyEnv` or `snap.apiKey` must be present. `snap.apiKey` accepts `${VAR}` interpolation (for example `"${SNAP_API_KEY}"`); the referenced environment variable must be set at runtime or the config loader throws.
+
+Changed-file scoping treats a GitHub `renamed` record as both the current
+`filename` and its nonempty `previous_filename`. This keeps a route selected
+when a watched file moves out of its configured `changePaths`, and also detects
+renames into watched or shared paths. Duplicate paths are ignored; other change
+statuses use only their current filename. The `pr-diff` wrapper's explicit
+`route-ids` and `force-run` inputs take precedence over this lookup; the
+standalone `scope` action supports `force-run` and otherwise derives its
+selection from the changed files. If GitHub returns the maximum 3,000 file
+records, both actions run all configured routes with reason
+`changed_files_truncated` because the list may be incomplete.
+
+Route ids are sanitized before local captures and Snap baseline exports write
+`screenshots/<route-id>.png`: `..` becomes `_`, path separators become `_`, and
+control characters are removed. Distinct route ids that produce the same
+sanitized filename are rejected before capture starts. Rename one of the route
+ids and recapture the affected baseline; existing screenshot filenames remain
+unchanged for noncolliding ids.
 
 ### Example (local provider)
 
@@ -101,6 +120,27 @@ The published baseline bundle contains:
 | `manifest.json` | Screenshot manifest with ids, paths, and dimensions |
 | `screenshots/*.png` | Captured screenshot images |
 
+Every manifest entry must use a unique staged screenshot filename (the basename
+of `imagePath`). Duplicate paths or paths that flatten to the same filename are
+rejected before comparison, even when the run selects only one of the affected
+route ids, because they can point two logical screenshots at the same pixels.
+Rename the conflicting route ids and recapture the baseline and current bundle.
+
+### Baseline resolution
+
+The `actions/resolve-baseline` action and the `actions/pr-diff` wrapper distinguish three lookup
+outcomes: `found` means a successful search selected a non-expired artifact, `missing` means a
+successful search found no usable artifact, and `error` means GitHub returned an API, network, or
+malformed-response failure. The boolean `found` output remains available for compatibility; use
+`resolution-status` on `resolve-baseline` or `baseline-resolution-status` on `pr-diff` when the
+reason matters. A missing baseline may produce the intentional first-run skipped summary. A lookup
+error fails local comparisons and local Snap fallbacks, so infrastructure failures cannot be
+reported as a clean or intentional missing-baseline result. Healthy hosted Snap diffs may continue
+using their hosted baseline path after a GitHub artifact lookup error.
+The standalone `actions/resolve-baseline` action fails its step for `error`; custom workflows
+should branch on `resolution-status` rather than treating `found: false` as proof that no baseline
+exists.
+
 ## Drift artifact
 
 The pull request drift bundle contains:
@@ -115,8 +155,11 @@ The pull request drift bundle contains:
 | `current/results.json` | Current capture results |
 | `current/manifest.json` | Current manifest |
 | `current/screenshots/*.png` | Current images |
+| `diffs/*.png` | Generated v1 diff images for changed screenshots |
 
 ## Screenshot manifest shape
+
+Minimal legacy example (new local captures also write `captureProfile`):
 
 ```json
 {
@@ -134,6 +177,75 @@ The pull request drift bundle contains:
   ]
 }
 ```
+
+### Local capture profile v2
+
+New local captures persist `captureProfile` with `schemaVersion: 2`. This version
+is independent of the outer manifest schema (which defaults to 1 when omitted)
+and comparison policy v1. The profile records:
+
+| Field | Local capture value |
+|:------|:--------------------|
+| `engine`, `engineVersion` | `{ "name": "snapdrift-local", "version": "<adapter-fs version>" }`; `engineVersion` equals `engine.version` |
+| `browser`, `browserRevision`, `playwrightVersion` | `chromium`, the running browser's `browser.version()` string, and the installed Playwright version |
+| `platform` | `name`, `architecture`, `release`, `version` from Node's OS APIs |
+| `locale`, `timezone` | `en-US`, `UTC` |
+| `settings.screenshot` | `fullPage: true`, `animations: "disabled"`, `caret: "hide"`, `scale: "device"`, `omitBackground: false`, `type: "png"` |
+| `settings.readiness` | `waitUntil: "load"`, `settleDelayMs: 300` |
+| `settings.context` | `isolation: "fresh-context-per-attempt"`, `colorScheme: "light"`, `reducedMotion: "no-preference"`, `forcedColors: "none"`, `javaScriptEnabled: true`, `serviceWorkers: "allow"` |
+| `settings.launch` | `headless: true`, `args: ["--disable-gpu"]` |
+
+These are persisted metadata, not new configuration knobs. Local v2 requires
+all listed fields with valid types/settings and matching engine version fields.
+Fonts are **not fingerprinted**: local capture does not populate the optional
+`fontsHash`, so a verified profile is not proof of identical installed fonts.
+Explicit `en-US` / `UTC` replaces environment-dependent defaults and may change
+localized text or dates; recapture affected baselines after upgrading.
+
+### Local compatibility before pixels
+
+Both manifests are validated after loading and before manifest entries are
+indexed and PNGs are resolved.
+Malformed manifests/profiles and unsupported profile schema versions (anything
+other than omitted, 1, or 2) throw before a comparison summary is generated;
+`report-only` does not suppress these input errors.
+
+- Two local v2 profiles must match exactly across the full profile, including
+  extra fields. Object key order is ignored; array order and values matter.
+  There is no version tolerance: adapter, Playwright, browser, or OS updates can
+  require a baseline refresh. The reason identifies the first differing field.
+- For each selected configured route id present in both manifests, both entries
+  must have the exact configured `path` and the same normalized viewport as the
+  config: width, height, device scale factor, mobile, and touch. Paths are not
+  URL-normalized; `baseUrl` and timestamps are not compared. Custom viewports use
+  scale 1, mobile false, touch false: 1440×900 equals `desktop`, but 390×844 does
+  not equal `mobile`. Missing entries retain their missing/error classification.
+- A profile or route-identity mismatch adds an `errors[]` item with
+  `status: "error"` and `code: "incompatible_capture"`. That route's PNGs are
+  not resolved, read, or pixel-compared, even if they would be byte-identical.
+  The summary is `incomplete`, not product drift. With compatible identity,
+  changed full-page raster dimensions remain normal union-canvas `changed[]`
+  signals, independent of threshold.
+- Missing profiles or profiles with omitted/v1 schema remain usable but
+  `unverified`, with a warning in `summary.message`; pixels can still be compared
+  after route checks. If both profiles provide `browser`, `browserRevision`,
+  `fontsHash`, `timezone`, or `locale`, a difference in any shared field is
+  incompatible. An explicit foreign `engine.name` on either side is incompatible
+  even when the other profile is absent. Legacy engine versions alone do not
+  establish verified compatibility.
+
+`summary.captureCompatibility` contains profile-level `status` (`verified`,
+`unverified`, or `incompatible`) and an optional `reason`. It is **not** an
+aggregate route status: profiles can be `verified` while route path/viewport
+checks produce `incompatible_capture` errors. Unverified alone does not make a
+run incomplete or fail enforcement.
+
+Refresh the baseline using the [existing CLI or baseline action](local-cli.md#refreshing-or-acknowledging-local-baselines)
+in the intended capture environment. For intentional nonblocking acknowledgement,
+set `diff.mode` to `report-only`: it preserves incompatibility errors and never
+overrides compatibility to compare pixels. `fail-on-incomplete` and `strict`
+fail on those errors; `fail-on-changes` does not fail on incompatibility alone
+but still fails if other comparable routes changed.
 
 ## Summary shape
 
@@ -168,7 +280,20 @@ The pull request drift bundle contains:
 
 | Field | Type | Description |
 |:------|:-----|:------------|
+| `captureCompatibility` | `{ status, reason? }?` | Local profile-level compatibility: `verified`, `unverified`, or `incompatible`; route identity errors are separate |
 | `dashboardUrl` | `string?` | Snap dashboard URL for the run (set by `SnapProvider`; omitted by `LocalProvider`) |
+| `comparisonPolicy` | `{ "version": 1, "threshold": number }?` | Effective v1 comparison policy used by the local adapter (synthesized from `diff.threshold` when not configured) |
+
+When v1 comparison is applied, each affected `changed[]` item may also contain
+`comparison` with `baseline`, `current`, and `canvas` `{ width, height }`
+objects, `dimensionsChanged`, and the effective `totalPixels` denominator. A
+local changed item with a generated image contains `diffImagePath`, relative to
+the diff output bundle (for example `diffs/home.png`).
+
+When a changed item has a generated local `diffImagePath`, its PR comment cell
+links to the uploaded report artifact (or the workflow run when no artifact URL
+was supplied) and shows the bundle-relative path. It does not use that relative
+path as a GitHub-hosted image URL.
 
 ### Status values
 
@@ -176,7 +301,7 @@ The pull request drift bundle contains:
 |:-------|:--------|
 | `clean` | All captures matched within threshold |
 | `changes-detected` | One or more captures exceeded threshold |
-| `incomplete` | Missing captures, dimension shifts, or comparison errors occurred |
+| `incomplete` | Missing captures or comparison errors occurred |
 | `skipped` | The report was intentionally skipped |
 
 ### Skipped summary
@@ -194,20 +319,22 @@ Additional missing-baseline fields: `baselineAvailable`, `currentResultsPath`.
 
 ## Drift semantics
 
-- Screenshots are matched by `id`
+- Screenshots are matched by `id`; local profile and configured path/normalized viewport compatibility are checked before pixels (see [Local compatibility before pixels](#local-compatibility-before-pixels))
 - Mismatch ratio is `different_pixels / total_pixels`
 - `diff.threshold` applies per screenshot
 - Missing captures are counted separately from drift signals
-- Dimension mismatches skip pixel comparison and land in `dimensionChanges[]`
+- Comparison policy v1 `{ "version": 1, "threshold": number }` is always applied. When `diff.comparisonPolicy` is absent, SnapDrift synthesizes it from `diff.threshold`. Images are top-left aligned on a max-dimension union canvas with no scaling. Overlap pixels are compared, one-sided pixels count as changed (including transparent pixels), and empty union corners do not enter the denominator. Dimension changes land in `changed[]` with comparison metadata and a generated local diff image.
+- `dimensionChanges[]` remains part of the summary contract but is empty for local comparisons in v1. Strict same-dimension comparison (`compareBuffers`) remains available to direct `@snapdrift/compare-core`/`comparePngs` callers that pass no policy.
+- Threshold is applied after pixel aggregation. A mismatch exactly equal to the threshold is matched; a dimension change is still a changed signal independent of ratio.
 - `diff.mode` controls enforcement, not summary generation
 
 ## Drift modes
 
 | Mode | Stops the run when |
 |:-----|:-------------------|
-| `report-only` | Never |
+| `report-only` | Never from summary enforcement; validation/capture failures still fail |
 | `fail-on-changes` | `changedScreenshots > 0` |
-| `fail-on-incomplete` | Errors, dimension shifts, or missing captures occur |
+| `fail-on-incomplete` | Errors or missing captures occur; a completed v1 dimension comparison alone does not fail |
 | `strict` | Any drift or incomplete comparison appears |
 
 A summary with `status: "skipped"` — or any summary carrying no `diff.mode` —
@@ -223,6 +350,67 @@ directly, not just for the guarded enforcement step inside `actions/pr-diff`.
 | `desktop` | 1440 | 900 | 1 | No | No |
 | `mobile` | 390 | 844 | 3 | Yes | Yes |
 
+## Screenshot size budget
+
+SnapDrift compares full-page screenshots using their rendered raster dimensions.
+The unequal-dimension comparator bounds the union canvas at `32 × 1024 × 1024`
+pixels (`33,554,432` pixels). A comparison is oversized when:
+
+```text
+max(baselineWidth, currentWidth) × max(baselineHeight, currentHeight) > 33,554,432
+```
+
+This is a raster-pixel limit, not a direct CSS viewport limit. Full-page capture
+height is the document height, and `deviceScaleFactor` increases both raster
+width and raster height. The baseline/current union also means that a dimension
+change can make an otherwise valid image exceed the budget. Leave headroom for
+horizontal overflow or other layout changes that increase the rendered image
+dimensions.
+
+The comparator reports this condition with the stable error code
+`comparison_too_large` and includes the baseline, current, and union-canvas
+dimensions in the error message. The ceiling that was exceeded is included too,
+since a caller may raise it per call.
+
+`32 × 1024 × 1024` is the *default* ceiling, not an algorithm property. The cost
+is dominated by the decoded images: both RGBA inputs (4 bytes per pixel each) are
+retained plus, when the diff image is rendered (the default), a union-sized diff
+canvas — at least ~12 bytes per union pixel when both inputs approach the union
+dimensions, before PNG decode/encode overhead. Measured end-to-end RSS on real
+full-page captures is ~32-35 bytes per union pixel (~1.16 GB at 33.8 M pixels,
+~3.37 GB at 103.9 M), so the default bounds a comparison to a process with a few
+GB of headroom.
+
+Direct `@snapdrift/compare-core` callers running in a larger memory envelope can
+pass `compareImages(..., { maxPixels })` to raise it for that call. **Size
+`maxPixels` against your own measured peak**, not against the byte-per-pixel
+arithmetic: PNG decode and encode overhead, GC, and concurrency all add to it. A
+missing, non-finite, or sub-1 `maxPixels` falls back to the default; fractions are
+floored (`16.9` becomes `16`). The sub-1 rule matters because a positive fraction
+such as `0.5` floors to `0`, which would otherwise reject every comparison.
+SnapDrift's own local and hosted paths keep the default, because the host process
+— not the image — decides how much memory is actually safe.
+
+Approximate maximum full-page CSS heights below
+assume that the raster width remains equal to the configured CSS width and that
+the document height scales by the same device scale factor:
+
+| Configuration | CSS viewport | Scale factor | Approx. maximum full-page CSS height |
+|:--------------|:-------------|-------------:|-------------------------------------:|
+| `desktop` preset | 1440 × 900 | 1 | 23,301 px |
+| `mobile` preset | 390 × 844 | 3 | 9,559 px |
+| Custom 390 × 844 viewport | 390 × 844 | 1 | 86,037 px |
+
+These are planning estimates, not guarantees. Check the actual `width` and
+`height` recorded in the capture results or screenshot manifest, then apply the
+union-canvas formula above. A custom viewport object currently uses scale factor
+1 with `isMobile: false` and `hasTouch: false`; it is therefore not equivalent
+to the named `mobile` preset. Use it to avoid unnecessary raster inflation only
+when the route does not require mobile device emulation. Otherwise, reduce the
+captured document or fixture height, or split the coverage across routes when
+that matches the product behavior. Do not resize or crop screenshots, or lower
+`diff.threshold`, to work around this limit.
+
 ## Capture defaults
 
 | Setting | Value |
@@ -232,6 +420,14 @@ directly, not just for the guarded enforcement step inside `actions/pr-diff`.
 | Settle delay | 300ms |
 | Screenshot animations | `disabled` (Playwright finishes/cancels CSS animations before capture) |
 | Capture concurrency | 5 routes per viewport (overridable via `SNAPDRIFT_CAPTURE_CONCURRENCY`)|
+
+Local Playwright captures use a fresh browser context for every route attempt,
+including retries. Cookies and browser storage are not shared between routes,
+even when routes share a viewport or run serially. This also applies to Snap's
+local-capture hybrid, not to rendering performed by the hosted service. Viewport
+groups still run concurrently, with the configured limit applied per group.
+Previously leaked storage may have affected existing baselines; recapture them
+after upgrading if storage-dependent UI produces a one-time change.
 
 ## Local CLI directory layout
 
@@ -259,18 +455,16 @@ All three directories can be overridden with `--baseline-dir`, `--current-dir`, 
 
 ### migrate-baselines
 
-Migrate baselines between local storage and Snap. Both directions require a `snap` block in `snapdrift.json` (or `--to local` for the `snap → local` direction, since the export call still talks to Snap first).
+Move baselines between local storage and Snap. Only the `snap → local` direction is supported; it requires a `snap` block in `snapdrift.json` (the export call talks to Snap).
 
-**Upload local baselines to Snap:**
+**Upload local baselines to Snap — not supported:**
 
 ```
-snapdrift migrate-baselines --to snap [--config <path>] [--baseline-dir <dir>]
+snapdrift migrate-baselines --to snap   # always fails
 ```
 
-- Reads `results.json`, `manifest.json`, and `screenshots/*.png` from the local baseline directory.
-- Uploads as the initial accepted baseline on Snap via `POST /v1/visual/projects/:id/baselines`.
-- Idempotent: if a baseline already exists for the same commit SHA (derived from `GITHUB_SHA` or `git rev-parse HEAD`), the upload is skipped.
-- Screenshots are base64-encoded in the request body; very large suites may want to migrate per-route.
+- The command exits with an error. Snap cannot accept a pre-built local baseline bundle: the screenshots it carries are never uploaded to Snap storage, and its manifest references local filenames rather than Snap object keys, so the call could only ever create a baseline with no pixels behind it. Snap rejects the request with `400 unsupported_baseline_body` (i2Dev-com/snap#653); the legacy `SnapProvider.migrateBaselineFromLocal()` path was removed in 0.7.0.
+- **Use `snapdrift baseline` instead** — with `provider: "snap"` it captures each route through Snap so the images actually land in storage, then publishes a baseline referencing the stored objects. Canonical hosted publication is CI-only (default-branch job); see [`snapdrift baseline`](local-cli.md#snapdrift-baseline).
 
 **Download Snap baselines to local:**
 
@@ -328,6 +522,8 @@ A hosted baseline is an authoritative complete snapshot. For `purpose: "baseline
 
 The capture `results.json` records `configuredRouteIds`, `selectedRouteIds`, and `expectedCaptures` (route id, path, and viewport descriptor), plus one resolved `refBranch` / `refSha`, publication workflow ref, and publication sequence. The run-creation request sends the same immutable set and sequence as `capturePlan` and sends the ref as `branch` / `prHeadSha`. Before publication, SnapDrift requires the source run to belong to the configured project, settle to terminal `new`, and contain exactly one successful `new` capture with a non-empty `currentObjectKey` for every expected route/viewport identity. It keeps polling while any expected capture remains non-terminal, even when an older server reports the run itself as terminal, but fails fast after a stable incomplete capture set. Failed, missing, duplicate, extra, path-mismatched, or malformed captures abort before the baseline request. If another default-branch baseline wins first, Snap returns `409 baseline_stale_source`; rerun the current baseline job.
 
+Hosted PR diffs use the same persisted `expectedCaptures` identities. `SnapProvider.diff()` requires `purpose: "diff"` plus a nonempty, unique expected set consistent with `selectedRouteIds`; results written by older SnapDrift versions without that set must be recaptured. It polls until the expected capture count is available, verifies the returned run id, and reconciles every returned capture by route id, path, and normalized viewport descriptor. Missing expected captures, duplicate or unexpected identities, pending or unknown statuses, run or capture errors, missing current objects, and invalid `diffPct` values produce an `incomplete` summary and are never counted as clean matches. A valid comparison requires a current object, a baseline object, and a finite numeric mismatch ratio from 0 through 1. The `diff.mode` setting then controls whether that incomplete summary fails the check.
+
 Publication sends `publicationMode: "complete"` and the source run id both as top-level `sourceRunId` and as `manifest.sourceRunId`. The baseline id is deterministically derived from the run id, and manifest routes are sorted, so a retry sends the same identity and payload. Reusing that id with different persisted fields is rejected; rerun the baseline job to obtain a new source run. `refBranch` / `refSha` come from the persisted capture metadata rather than resolving git a second time. Snap accepts complete publication only from the project's default branch (effective default `main`).
 
 ### Local-capture hybrid
@@ -356,9 +552,21 @@ SnapDrift uses a small, stable subset of the Snap API:
 The Snap HTTP client classifies responses and applies the following rules:
 
 - **2xx** — success, return the parsed body.
-- **4xx** — non-retryable. The client throws `SnapApiError(status, message, path)` immediately. `onUnavailable` is **not** consulted for 4xx — a 404 from `/baselines/latest` is a "no baseline yet" signal, but a 4xx from `/runs` is a configuration error that retrying won't fix.
-- **5xx** — retryable up to 3 attempts with exponential backoff (`1 s` → `2 s` → `4 s`, capped at `30 s` total). If the final attempt still returns 5xx, the client falls through to the `onUnavailable` handler.
-- **Network errors** — same retry/backoff behavior as 5xx. After exhaustion, falls through to the `onUnavailable` handler.
+- **4xx** — non-retryable. The client throws `SnapApiError(status, message, path)` immediately. `onUnavailable` is **not** consulted for 4xx — a 404 from `/baselines/latest` is a "no baseline yet" signal, but a 4xx from `/runs` is a configuration error that retrying won't fix. If the diagnostic body itself stalls or is unavailable, the same `SnapApiError` retains the HTTP status and includes that diagnostic failure.
+- **5xx** — retryable up to 3 attempts with exponential backoff (`1 s` → `2 s` → `4 s`, with each delay capped at `30 s`). If the final attempt still returns 5xx, the client falls through to the `onUnavailable` handler.
+- **Network errors and transport timeouts** — same retry/backoff behavior as 5xx. After exhaustion, falls through to the `onUnavailable` handler.
+
+Every JSON request attempt has a 30-second limit; binary export attempts have a
+120-second limit. Headers and response bodies share the applicable attempt
+limit, and each public Snap operation has one 10-minute deadline covering all
+of its requests, retries, backoff, and polling. The client passes an
+`AbortSignal` to fetch and aborts/cancels stalled bodies; injected transports
+that ignore cancellation are still released by the client-side deadline.
+Retry and poll waits are clipped to the remaining operation time, so no new
+request starts after the operation deadline. Deadline exhaustion is treated as
+Snap unavailability and follows `onUnavailable`; received 4xx responses keep
+their immediate non-retryable behavior, and a stalled 4xx diagnostic body
+retains its HTTP status with a timeout diagnostic.
 
 `onUnavailable` is consulted once retries are exhausted:
 
@@ -376,7 +584,7 @@ alike:
 | Phase | `warn-and-skip` | `fallback-local` |
 |:------|:----------------|:-----------------|
 | Capture | Write a skipped `summary.json`/`summary.md` with reason `snap_unavailable`, expose the summary outputs, stage the report, exit 0. | Capture with `LocalProvider` and report the **effective** provider (`local`) so the rest of the pipeline uses local artifacts and the local pixel engine. |
-| Diff | Same skipped summary, exit 0. | Diff with `LocalProvider`. A capture that Snap rendered server-side has no PNGs on the runner, so the routes are **recaptured locally first**; the recaptured paths replace the Snap ones in the staged bundle. If no baseline artifact was resolved, the run reports `missing_main_baseline_artifact` instead of crashing the local diff. |
+| Diff | Same skipped summary, exit 0. | Diff with `LocalProvider`. A capture that Snap rendered server-side has no PNGs on the runner, so the routes are **recaptured locally first**; the recaptured paths replace the Snap ones in the staged bundle. If baseline resolution succeeded but no artifact was found, the run reports `missing_main_baseline_artifact`; a lookup error fails instead of entering the missing-baseline path. |
 | Baseline publish | Skip the publish and exit 0 without an artifact. | Capture locally and stage/upload that bundle, so the run still leaves a usable baseline. |
 
 Enforcement of `diff.mode` never runs against a skipped summary — a skipped run
@@ -402,12 +610,60 @@ All four error classes are exported from `lib/provider.mjs` and `lib/snap-provid
 
 | Class | Thrown when | Typical handler |
 |:------|:------------|:----------------|
-| `SnapApiError` | A 4xx response was received, or a 5xx/network error was retried to exhaustion. Carries `status` and `path` properties. | Surface the message; do not retry. |
-| `SnapUnavailableError` | A network error or 5xx was retried to exhaustion (used internally; usually re-wrapped as `SnapApiError`). | Treat as a temporary outage. |
+| `SnapApiError` | A 4xx response was received, including a response whose diagnostic body stalled. Carries `status` and `path` properties. A final 5xx response also retains its status when it reaches the outage handler. | Surface the message; do not retry. |
+| `SnapUnavailableError` | A retryable network error, transport timeout, or operation deadline was exhausted. In fail mode this may be surfaced directly; skip and fallback modes wrap it in their policy error. | Treat as a temporary outage. |
 | `SnapFallbackError` | `onUnavailable: "fallback-local"` is set and Snap could not be reached. | Catch and switch to `LocalProvider` for the rest of the pipeline. |
 | `SnapSkipError` | `onUnavailable: "warn-and-skip"` is set and Snap could not be reached. | Catch and exit cleanly with a skipped summary. |
 
 The wrapper actions (`actions/baseline`, `actions/pr-diff`) and the CLI both handle `SnapSkipError` and `SnapFallbackError` through `lib/outage-policy.mjs` (`captureWithPolicy`, `diffWithPolicy`, `publishBaselineWithPolicy`). Custom orchestrations that call `provider.capture()`, `provider.diff()` or `provider.publishBaseline()` directly should use those helpers rather than re-implementing the matrix.
+
+`SnapTransportTimeoutError` is an internal diagnostic name used while a
+request or response body is being bounded. It is not an additional public
+error class; callers should handle the exported error classes above.
+
+## Shared orchestration
+
+GitHub-facing request handling is shared between the wrapper and standalone
+actions through `lib/github-requests.mjs`. The github-script steps stay as thin
+adapters that load the module, inject `{ github, owner, repo, context }`-style
+inputs, and map the returned decision to step outputs:
+
+- `fetchPullRequestFiles` paginates `pulls.listFiles` (100 per page) and
+  validates each record's `filename` before any scope decision is made.
+- `resolveScopeDecision` is pure: renamed files contribute
+  `previous_filename`, paths are deduplicated, 3000+ records short-circuit to
+  running all routes (`changed_files_truncated`), and an empty list maps to
+  `no_changed_files`. Other reasons come from
+  `selectRoutesForChangedFiles`.
+- `resolvePullRequestScope` composes the above with the
+  explicit-route/force-run/missing-PR shortcuts and the
+  `snapdrift_scope_check_failed` fallback warning.
+- `upsertPullRequestReportComment` performs the marker-filtered, newest-first
+  comment upsert with duplicate deletion used by `actions/comment` and the
+  `actions/pr-diff` report step. The create-only "Capture Failed" /
+  "Baseline Lookup Failed" fallback body remains inline in `actions/pr-diff`.
+
+The baseline resolver keeps its own module (`lib/resolve-baseline-artifact.mjs`)
+because both actions already share it verbatim.
+
+### Capture artifact capabilities
+
+Providers now return `artifacts` on capture results, attached in the provider layer
+rather than adapter-fs:
+
+- `localScreenshots`: whether PNGs are available locally for pixel comparison.
+- `artifactsRoot`: the capture's `screenshotsRoot` for local and Snap hybrid
+  captures (`localScreenshots: true`); `undefined` for hosted remote captures
+  (`localScreenshots: false`), even though their metadata has a local path.
+
+`captureWithPolicy` prefers `result.artifacts` over provider-name/base-URL inference.
+For `diffWithPolicy`, pass the capture as `captureResult` or forward its `artifacts`.
+Precedence is the legacy `options.localScreenshots` boolean (if supplied), then
+`options.artifacts`, then `captureResult.artifacts`, then provider/config inference.
+The boolean overrides only `localScreenshots`; false clears `artifactsRoot`.
+Inference remains for legacy results without a descriptor when config is supplied.
+If no capability arguments, result descriptor, or config are supplied to
+`diffWithPolicy`, it preserves the legacy local-screenshots default without recapture.
 
 ## Primary entrypoints
 
@@ -435,7 +691,7 @@ These are for custom orchestration only. Wrapper actions set them automatically.
 | `SNAPDRIFT_BASELINE_ARTIFACT_NAME` | `compare-results.mjs` | Baseline artifact label to embed in the report |
 | `SNAPDRIFT_BASELINE_SOURCE_SHA` | `compare-results.mjs` | Baseline source SHA to embed in the report |
 | `SNAPDRIFT_ENFORCE_OUTCOME` | `compare-results.mjs` | Set to `0` to disable enforcement in direct CLI usage |
-| `SNAPDRIFT_CAPTURE_CONCURRENCY` | `capture-routes.mjs` | Max concurrent route captures per viewport context (positive integer, default `5`). Set to `1` to restore serial behaviour for apps with shared session/auth state. |
+| `SNAPDRIFT_CAPTURE_CONCURRENCY` | `capture-routes.mjs` | Max concurrent route captures per viewport group (positive integer, default `5`). Each local attempt uses a fresh browser context. Set to `1` to serialize each group without sharing storage. |
 
 ## PR comment markdown shape
 
@@ -490,6 +746,7 @@ Snap's server-side notification posting should render the same template from the
 | Field | Type | Description |
 |:------|:-----|:------------|
 | `artifactName` | `string?` | PR diff artifact label |
+| `artifactUrl` | `string?` | Authenticated GitHub Actions artifact URL for diff links |
 | `runUrl` | `string?` | GitHub Actions run URL (adds `[View run]` link) |
 | `dashboardUrl` | `string?` | Snap dashboard URL (adds `[View in dashboard →]` link; SnapProvider only) |
 | `maxChangedRows` | `number` | Max drift-signal rows before truncation (default 20) |
@@ -505,3 +762,45 @@ The `VisualProvider` interface requires `buildCommentBody(summary, meta?)`:
 
 - **`LocalProvider`** — delegates to `buildReportCommentBody` without a `dashboardUrl`.
 - **`SnapProvider`** — constructs `dashboardUrl` from `{apiUrl}/projects/{projectId}/runs/{lastRunId}` and passes it through.
+
+
+## Workspace TypeScript contracts
+
+The four `@snapdrift/*` workspace packages expose their declarations through a
+`types` export condition before the existing JavaScript entrypoint. ESM consumers
+can use Bundler, Node16, or NodeNext module resolution with `strict: true` and
+`skipLibCheck: false`; Node16/NodeNext consumers should use an ESM package or an
+`.mts` entrypoint. The top-level `types` field remains for older tooling.
+
+Install `typescript` and `@types/node` in the consuming development environment
+for APIs that use Node buffers. Cross-package declaration dependencies are
+declared by the package that needs them. `npm run check:package-types` packs the
+workspace packages and checks isolated consumers in all three resolution modes,
+including rejected invalid calls. `npm run typecheck` also checks declaration
+bodies without skipping library checks.
+
+These guarantees cover the workspace package entrypoints. They do not add type
+entrypoints for the root `snapdrift` package's JavaScript subpaths. Package release
+publication is required before existing registry consumers receive these fixes.
+
+Comment renderers accept `VisualReportSummary`: a complete comparison summary or
+a `VisualDriftStatusSummary` with a required status and reason. `buildDriftSummary`
+and `writeDriftSummary` return the latter, preserving their supported non-skipped
+statuses as well as intentional skips. Unrelated object literals are rejected.
+Known viewport presets have complete descriptors; arbitrary string lookups may
+return `undefined` and must be checked by consumers.
+
+The packed type gate runs in PR CI and before release publication. It validates
+the candidate workspace tarballs together, not already-published registry
+versions. Release preparation must bump every changed published package and
+raise sibling dependency floors to the versions that contain these type fixes
+before publication; the gate alone does not validate that release-version step.
+
+Each workspace package also declares every runtime package it imports. In
+particular, `@snapdrift/adapter-fs` declares `@snapdrift/adapter-report-md`, so
+it can be installed and imported without the SnapDrift repository or a sibling
+workspace masking a missing dependency. `npm run check:package-runtime` packs
+each workspace package, installs it in an isolated temporary consumer together
+with only its declared local workspace dependency closure, and imports its
+public entrypoint. The gate runs in pull-request and release workflows; publish
+the updated package before registry consumers can receive a dependency fix.

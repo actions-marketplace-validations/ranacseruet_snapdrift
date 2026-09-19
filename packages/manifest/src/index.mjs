@@ -2,6 +2,8 @@
 
 export { validateManifest, indexManifestEntries, indexRouteResults, CURRENT_SCHEMA_VERSION } from './schema.mjs';
 export { viewportKey, viewportHash, VIEWPORT_PRESETS } from './viewport.mjs';
+export { CAPTURE_PROFILE_SCHEMA_VERSION, validateCaptureProfile, checkCaptureProfileCompatibility, normalizedViewportIdentity } from './capture-profile.mjs';
+export { sanitizeRouteId, assertUniqueRouteIdFilenames } from './route-filenames.mjs';
 export { determineDriftStatus, shouldFailDriftCheck } from './drift-status.mjs';
 export {
   validateSnapdriftConfig,
@@ -10,6 +12,7 @@ export {
   resolveFromWorkingDirectory,
   splitCommaList,
   VALID_DIFF_MODES,
+  COMPARISON_POLICY_VERSION,
   VALID_PROVIDER_VALUES,
   VALID_ON_UNAVAILABLE_MODES,
   SNAPDRIFT_NAVIGATION_TIMEOUT_MS,

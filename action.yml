@@ -125,6 +125,9 @@ outputs:
   baseline-found:
     description: Whether a usable baseline was found.
     value: ${{ steps.pr-diff.outputs.baseline-found }}
+  baseline-resolution-status:
+    description: 'Baseline lookup status: found, missing, or error.'
+    value: ${{ steps.pr-diff.outputs.baseline-resolution-status }}
   status:
     description: Final SnapDrift status.
     value: ${{ steps.pr-diff.outputs.status }}
@@ -152,7 +155,7 @@ runs:
     - name: SnapDrift baseline
       id: baseline
       if: inputs.mode == 'baseline'
-      uses: ranacseruet/snapdrift/actions/baseline@3485e898104125db1f45ab27361770356a7564a8 # v0.8.2
+      uses: ranacseruet/snapdrift/actions/baseline@e4b92c2243c6e69594cab7405f68eb58fe94587e # v0.12.0
       with:
         repo-config-path: ${{ inputs.repo-config-path }}
         route-ids: ${{ inputs.route-ids }}
@@ -162,7 +165,7 @@ runs:
     - name: SnapDrift pull request diff
       id: pr-diff
       if: inputs.mode == 'pr-diff'
-      uses: ranacseruet/snapdrift/actions/pr-diff@3485e898104125db1f45ab27361770356a7564a8 # v0.8.2
+      uses: ranacseruet/snapdrift/actions/pr-diff@e4b92c2243c6e69594cab7405f68eb58fe94587e # v0.12.0
       with:
         github-token: ${{ inputs.github-token }}
         repo-config-path: ${{ inputs.repo-config-path }}

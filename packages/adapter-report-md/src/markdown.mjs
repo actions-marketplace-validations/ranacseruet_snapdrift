@@ -1,17 +1,43 @@
 // @ts-check
 
-import { DEFAULT_SNAPDRIFT_ICON_URL, DEFAULT_SNAPDRIFT_REPO_URL, STATUS_ICONS, STATUS_LABELS } from './constants.mjs';
+import { DEFAULT_SNAPDRIFT_ICON_URL, DEFAULT_SNAPDRIFT_REPO_URL, STATUS_ICONS, STATUS_LABELS, formatPercentage, formatViewport } from './constants.mjs';
+import { escapeMarkdown } from './pr-comment.mjs';
 
 /** @typedef {import('../../manifest/types/index').VisualDiffSummary} DriftSummary */
 /** @typedef {import('../../manifest/types/index').VisualDiffSummary['diffMode']} DriftMode */
 
+export { formatViewport };
+
 /**
- * @param {import('../../manifest/types/index').VisualViewport | undefined} viewport
+ * @param {{ width: number, height: number } | undefined} dimensions
  * @returns {string}
  */
-export function formatViewport(viewport) {
-  if (!viewport) return '';
-  return typeof viewport === 'string' ? viewport : `${viewport.width}x${viewport.height}`;
+function formatDimensions(dimensions) {
+  return dimensions ? `${dimensions.width}×${dimensions.height}` : '—';
+}
+
+/**
+ * @param {DriftSummary['changed']} changed
+ * @returns {DriftSummary['changed']}
+ */
+function getComparisonDimensionChanges(changed) {
+  return changed.filter((item) => item.comparison?.dimensionsChanged);
+}
+
+/**
+ * @param {DriftSummary['changed'][number]} item
+ * @returns {boolean}
+ */
+function hasComparisonDetails(item) {
+  return Boolean(item.comparison || item.diffImagePath);
+}
+
+/**
+ * @param {string | undefined} diffImagePath
+ * @returns {string}
+ */
+function formatDiffImage(diffImagePath) {
+  return diffImagePath ? `![Diff image](${diffImagePath})` : '—';
 }
 
 /**
@@ -23,6 +49,8 @@ export function makeMarkdown(summaryData) {
   const statusIcon = STATUS_ICONS[status] || '⚠️';
   const statusLabel = STATUS_LABELS[status] || status;
   const dimensionChanges = summaryData.dimensionChanges || [];
+  const comparisonDimensionChanges = getComparisonDimensionChanges(summaryData.changed);
+  const dimensionShiftCount = dimensionChanges.length + comparisonDimensionChanges.length;
   const selectedRoutes = summaryData.selectedRoutes?.length || 0;
 
   const lines = [
@@ -32,17 +60,22 @@ export function makeMarkdown(summaryData) {
     '',
     '| Selected routes | Stable captures | Diff mode | Threshold |',
     '|---------------:|----------------:|:----------|----------:|',
-    `| ${selectedRoutes} | ${summaryData.matchedScreenshots} | \`${summaryData.diffMode}\` | ${summaryData.threshold} |`,
+    `| ${selectedRoutes} | ${summaryData.matchedScreenshots} | \`${summaryData.diffMode}\` | ${formatPercentage(summaryData.threshold)} |`,
     '',
     '| Signal | Count |',
     '|:-------|------:|',
     `| Drift signals | ${summaryData.changedScreenshots} |`,
     `| Missing in baseline | ${summaryData.missingInBaseline} |`,
     `| Missing in current capture | ${summaryData.missingInCurrent} |`,
-    `| Dimension shifts | ${dimensionChanges.length} |`,
+    `| Dimension shifts | ${dimensionShiftCount} |`,
     `| Errors | ${summaryData.errors.length} |`,
     ''
   ];
+
+  if (summaryData.captureCompatibility?.status === 'unverified' && summaryData.message) {
+    lines.push(`> **Note:** ${escapeMarkdown(summaryData.message)}`);
+    lines.push('');
+  }
 
   const metaItems = [];
   if (summaryData.baselineArtifactName) {
@@ -64,10 +97,20 @@ export function makeMarkdown(summaryData) {
     lines.push('None');
   } else {
     lines.push('');
-    lines.push('| Route | Viewport | Mismatch | Pixels changed |');
-    lines.push('|:------|:---------|:---------|:---------------|');
+    const comparisonDetails = summaryData.changed.some(hasComparisonDetails);
+    if (comparisonDetails) {
+      lines.push('| Route | Viewport | Baseline | Current | Canvas | Mismatch | Pixels changed | Diff image |');
+      lines.push('|:------|:---------|:---------|:--------|:-------|:---------|:---------------|:-----------|');
+    } else {
+      lines.push('| Route | Viewport | Mismatch | Pixels changed |');
+      lines.push('|:------|:---------|:---------|:---------------|');
+    }
     for (const item of summaryData.changed) {
-      lines.push(`| ${item.id} | ${formatViewport(item.viewport)} | ${(item.mismatchRatio * 100).toFixed(2)}% | ${item.differentPixels}/${item.totalPixels} |`);
+      if (comparisonDetails) {
+        lines.push(`| ${item.id} | ${formatViewport(item.viewport)} | ${formatDimensions(item.comparison?.baseline)} | ${formatDimensions(item.comparison?.current)} | ${formatDimensions(item.comparison?.canvas)} | ${formatPercentage(item.mismatchRatio)} | ${item.differentPixels}/${item.totalPixels} | ${formatDiffImage(item.diffImagePath)} |`);
+      } else {
+        lines.push(`| ${item.id} | ${formatViewport(item.viewport)} | ${formatPercentage(item.mismatchRatio)} | ${item.differentPixels}/${item.totalPixels} |`);
+      }
     }
   }
 
@@ -87,10 +130,10 @@ export function makeMarkdown(summaryData) {
 
   lines.push('');
   lines.push('## Dimension shifts');
-  if (dimensionChanges.length === 0) {
+  if (dimensionShiftCount === 0) {
     lines.push('');
     lines.push('None');
-  } else {
+  } else if (comparisonDimensionChanges.length === 0) {
     lines.push('');
     lines.push('> SnapDrift detected a dimension shift between the baseline and current capture. Pixel comparison was skipped for these routes.');
     lines.push('>');
@@ -100,6 +143,20 @@ export function makeMarkdown(summaryData) {
     lines.push('|:------|:---------|:---------|:--------|');
     for (const item of dimensionChanges) {
       lines.push(`| ${item.id} | ${formatViewport(item.viewport)} | ${item.baselineWidth}×${item.baselineHeight} | ${item.currentWidth}×${item.currentHeight} |`);
+    }
+  } else {
+    lines.push('');
+    lines.push('> Pixel comparison included for opted-in unequal dimensions on a top-left-aligned union canvas.');
+    lines.push('>');
+    lines.push('> One-sided pixels count as changes, while `diff.comparisonPolicy.threshold` remains the per-route aggregation threshold.');
+    lines.push('');
+    lines.push('| Route | Viewport | Baseline | Current | Canvas | Diff image |');
+    lines.push('|:------|:---------|:---------|:--------|:-------|:-----------|');
+    for (const item of dimensionChanges) {
+      lines.push(`| ${item.id} | ${formatViewport(item.viewport)} | ${item.baselineWidth}×${item.baselineHeight} | ${item.currentWidth}×${item.currentHeight} | — | — |`);
+    }
+    for (const item of comparisonDimensionChanges) {
+      lines.push(`| ${item.id} | ${formatViewport(item.viewport)} | ${formatDimensions(item.comparison?.baseline)} | ${formatDimensions(item.comparison?.current)} | ${formatDimensions(item.comparison?.canvas)} | ${formatDiffImage(item.diffImagePath)} |`);
     }
   }
 

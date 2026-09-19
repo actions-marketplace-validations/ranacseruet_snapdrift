@@ -1,3 +1,5 @@
+import type { CompareBuffersResult, CompareImagesResult, CompareImagesMetricsResult } from '@snapdrift/compare-core';
+
 /**
  * Filesystem I/O adapter types for @snapdrift/adapter-fs.
  */
@@ -5,7 +7,9 @@
 import type {
   VisualRegressionConfig,
   VisualRegressionRouteConfig,
-  VisualDiffSummary
+  VisualDiffSummary,
+  VisualDriftStatusSummary,
+  ComparisonPolicy
 } from '@snapdrift/manifest';
 
 // --- config.mjs ---
@@ -22,16 +26,19 @@ export function loadSnapdriftConfig(configPath?: string): Promise<{
 
 // --- compare-files.mjs ---
 
+export function comparePngs(baselinePath: string, currentPath: string): Promise<CompareBuffersResult>;
+
 export function comparePngs(
   baselinePath: string,
-  currentPath: string
-): Promise<{
-  width: number;
-  height: number;
-  differentPixels: number;
-  totalPixels: number;
-  mismatchRatio: number;
-}>;
+  currentPath: string,
+  options: { comparisonPolicy: ComparisonPolicy }
+): Promise<CompareImagesResult>;
+
+export function comparePngs(
+  baselinePath: string,
+  currentPath: string,
+  options: { comparisonPolicy: ComparisonPolicy; renderDiffImage: false }
+): Promise<CompareImagesMetricsResult>;
 
 export function resolveImagePath(runDir: string, relativeImagePath: string): Promise<string>;
 
@@ -49,6 +56,9 @@ export interface GenerateDriftReportOptions {
   currentManifestPath?: string;
   baselineRunDir?: string;
   currentRunDir?: string;
+  diffImagesDir?: string;
+  /** Overrides the effective v1 comparison policy; synthesized from `diff.threshold` when omitted. */
+  comparisonPolicy?: ComparisonPolicy;
   routeIds?: Iterable<string>;
   baselineArtifactName?: string;
   baselineSourceSha?: string;
@@ -86,6 +96,7 @@ export interface StageArtifactsOptions {
   currentManifestPath?: string;
   baselineScreenshotsDir?: string;
   currentScreenshotsDir?: string;
+  diffImagesDir?: string;
 }
 
 export function stageArtifacts(options: StageArtifactsOptions): Promise<{
@@ -106,12 +117,10 @@ export interface WriteDriftSummaryOptions {
   markdownPath?: string;
 }
 
-export function writeDriftSummary(
-  options: WriteDriftSummaryOptions
-): Promise<{
+export function writeDriftSummary(options: WriteDriftSummaryOptions): Promise<{
   summaryPath: string;
   markdownPath: string;
-  summary: Record<string, unknown>;
+  summary: VisualDriftStatusSummary;
   markdown: string;
 }>;
 
@@ -123,9 +132,7 @@ export interface RunBaselineCaptureOptions {
   outDir?: string;
 }
 
-export function runBaselineCapture(
-  options?: RunBaselineCaptureOptions
-): Promise<{
+export function runBaselineCapture(options?: RunBaselineCaptureOptions): Promise<{
   resultsPath: string;
   manifestPath: string;
   screenshotsRoot: string;

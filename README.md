@@ -48,7 +48,7 @@ You keep ownership of checkout, build, startup, readiness, and teardown. SnapDri
 
 ```yaml
 - name: SnapDrift Baseline
-  uses: ranacseruet/snapdrift@v0.8.2
+  uses: ranacseruet/snapdrift@v0.12.0
   with:
     mode: baseline
     repo-config-path: .github/snapdrift.json
@@ -60,7 +60,7 @@ With `provider: "snap"`, baseline publication is a complete, fail-closed snapsho
 
 ```yaml
 - name: SnapDrift Report
-  uses: ranacseruet/snapdrift@v0.8.2
+  uses: ranacseruet/snapdrift@v0.12.0
   with:
     mode: pr-diff
     github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -70,6 +70,11 @@ With `provider: "snap"`, baseline publication is a complete, fail-closed snapsho
 That is the full integration. See the [Integration Guide](docs/integration-guide.md) for workflow examples, permissions, compatibility notes, advanced overrides, and the hosted Snap backend (`provider: "snap"`).
 
 The root action dispatches on `mode`. The same pipelines are also published as standalone actions — `ranacseruet/snapdrift/actions/baseline` and `ranacseruet/snapdrift/actions/pr-diff` — along with the lower-level `capture`, `compare`, `scope`, `resolve-baseline`, `stage`, `comment`, and `enforce` actions for custom orchestration.
+
+The lower-level `resolve-baseline` action reports `resolution-status` as `found`, `missing`, or
+`error`. A successful lookup with no non-expired artifact is `missing`; GitHub API, permission,
+network, or malformed-response failures are `error` and fail the standalone action so custom
+workflows do not mistake an unavailable baseline for a first-run skip.
 
 ## Local CLI
 
@@ -102,16 +107,21 @@ Start with `report-only` while baselines settle. Move to `fail-on-changes` or st
 |------|--------------------|
 | `report-only` | Never |
 | `fail-on-changes` | Any capture exceeds threshold |
-| `fail-on-incomplete` | Captures are missing, dimensions shift, or comparison errors occur |
+| `fail-on-incomplete` | Captures are missing or comparison errors occur |
 | `strict` | Any drift signal or incomplete comparison appears |
+
+Local comparisons check capture profiles and configured route/path/viewport identity
+before pixels. Incompatible captures produce incomplete errors, not product drift;
+`report-only` never bypasses these checks. See [compatibility and baseline refresh](docs/local-cli.md#refreshing-or-acknowledging-local-baselines).
 
 ## Current constraints
 
 - Ubuntu runners only (local CLI works on any OS Node 22+ supports)
 - Full-page capture only
 - Viewport presets: `desktop` (1440×900) and `mobile` (390×844), or custom `{ "width": number, "height": number }`
+- Full-page comparisons are bounded to a 32 Mi-pixel union canvas; see the [screenshot size budget](docs/contracts.md#screenshot-size-budget) for viewport, device-scale, and remediation guidance
 - One global `diff.threshold`
-- Dimension shifts are reported separately from pixel drift
+- Unequal dimensions compare on a top-left-aligned union canvas via comparison policy v1, which is always applied (synthesized from `diff.threshold` when `diff.comparisonPolicy` is absent)
 - Local provider writes artifacts to the runner filesystem; for a hosted backend with a dashboard and a shared baseline store, configure `provider: "snap"` (see the [Integration Guide](docs/integration-guide.md#hosted-snap-provider))
 - Hosted Snap baselines publish only from the default branch and always include the complete configured route set
 

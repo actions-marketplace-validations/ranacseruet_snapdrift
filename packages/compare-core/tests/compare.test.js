@@ -1,5 +1,5 @@
 import pngjs from 'pngjs';
-import { compareBuffers, generateDiffImage, compareWithIgnoreRegions } from '../src/index.mjs';
+import { compareBuffers, compareImages, generateDiffImage, compareWithIgnoreRegions } from '../src/index.mjs';
 
 const { PNG } = pngjs;
 
@@ -288,5 +288,146 @@ describe('@snapdrift/compare-core — compareWithIgnoreRegions', () => {
     const result = compareWithIgnoreRegions(buf, buf, []);
     expect(result.width).toBe(20);
     expect(result.height).toBe(30);
+  });
+});
+
+describe('@snapdrift/compare-core — compareImages', () => {
+  test('compares top-left overlap without counting empty union corners', () => {
+    const baseline = solidPng(2, 2, [0, 0, 0, 255]);
+    const current = solidPng(3, 1, [0, 0, 0, 255]);
+
+    const result = compareImages(baseline, current);
+
+    expect(result.width).toBe(3);
+    expect(result.height).toBe(2);
+    expect(result.totalPixels).toBe(5);
+    expect(result.differentPixels).toBe(3);
+    expect(result.mismatchRatio).toBe(3 / 5);
+    expect(result.comparison).toEqual({
+      baseline: { width: 2, height: 2 },
+      current: { width: 3, height: 1 },
+      canvas: { width: 3, height: 2 },
+      dimensionsChanged: true,
+      totalPixels: 5
+    });
+
+    const diffPng = PNG.sync.read(result.diffImageBuffer);
+    // (2,1) is outside both source images and must not dilute the union ratio.
+    expect([...diffPng.data.slice((1 * 3 + 2) * 4, (1 * 3 + 2) * 4 + 4)]).toEqual([0, 0, 0, 0]);
+  });
+
+  test('counts a transparent one-sided pixel as changed and highlights it', () => {
+    const baseline = solidPng(2, 1, [0, 0, 0, 255]);
+    const currentPng = new PNG({ width: 3, height: 1 });
+    currentPng.data.fill(0);
+    for (let offset = 0; offset < 2 * 4; offset += 4) {
+      currentPng.data[offset + 3] = 255;
+    }
+    const current = PNG.sync.write(currentPng);
+
+    const result = compareImages(baseline, current);
+    const diffPng = PNG.sync.read(result.diffImageBuffer);
+
+    expect(result.differentPixels).toBe(1);
+    expect(result.totalPixels).toBe(3);
+    expect(result.pct).toBe(result.mismatchRatio);
+    expect(result.pixelsChanged).toBe(result.differentPixels);
+    expect([...diffPng.data.slice(8, 12)]).toEqual([255, 0, 0, 255]);
+  });
+
+  test('excludes masked pixels from the denominator and renders them gray', () => {
+    const baseline = solidPng(2, 1, [0, 0, 0, 255]);
+    const current = solidPng(3, 1, [255, 255, 255, 255]);
+
+    const result = compareImages(baseline, current, {
+      ignoreRegions: [{ x: 2, y: 0, width: 1, height: 1 }]
+    });
+    const diffPng = PNG.sync.read(result.diffImageBuffer);
+
+    expect(result.totalPixels).toBe(2);
+    expect(result.differentPixels).toBe(2);
+    expect(result.mismatchRatio).toBe(1);
+    expect([...diffPng.data.slice(8, 12)]).toEqual([128, 128, 128, 128]);
+  });
+
+  test('returns a zero denominator when masks cover the whole union canvas', () => {
+    const baseline = solidPng(2, 2, [0, 0, 0, 255]);
+    const current = solidPng(3, 1, [255, 255, 255, 255]);
+
+    const result = compareImages(baseline, current, {
+      ignoreRegions: [{ x: -1, y: -1, width: 10, height: 10 }]
+    });
+
+    expect(result.totalPixels).toBe(0);
+    expect(result.differentPixels).toBe(0);
+    expect(result.mismatchRatio).toBe(0);
+    expect(result.comparison.totalPixels).toBe(0);
+  });
+
+  test('keeps equal-size metrics and diff pixels equivalent to the strict image renderer', () => {
+    const baseline = solidPng(2, 2, [0, 0, 0, 255]);
+    const current = solidPng(2, 2, [255, 255, 255, 255]);
+
+    const result = compareImages(baseline, current);
+
+    expect(result.comparison).toEqual({
+      baseline: { width: 2, height: 2 },
+      current: { width: 2, height: 2 },
+      canvas: { width: 2, height: 2 },
+      dimensionsChanged: false,
+      totalPixels: 4
+    });
+    expect(result.diffImageBuffer).toEqual(generateDiffImage(baseline, current));
+  });
+
+  test('does not apply a threshold inside pixel computation', () => {
+    const baseline = solidPng(2, 1, [0, 0, 0, 255]);
+    const current = solidPng(2, 1, [255, 255, 255, 255]);
+
+    const result = compareImages(baseline, current, /** @type {any} */ ({ threshold: 1 }));
+
+    expect(result.differentPixels).toBe(2);
+    expect(result.mismatchRatio).toBe(1);
+  });
+
+  test('short-circuits identical buffers and reuses the baseline buffer as the diff image', () => {
+    const baseline = solidPng(4, 3, [12, 34, 56, 255]);
+    const result = compareImages(baseline, baseline);
+
+    expect(result.differentPixels).toBe(0);
+    expect(result.totalPixels).toBe(12);
+    expect(result.mismatchRatio).toBe(0);
+    expect(result.diffImageBuffer).toBe(baseline);
+
+    const diffPng = PNG.sync.read(result.diffImageBuffer);
+    expect(diffPng.width).toBe(4);
+    expect(diffPng.height).toBe(3);
+    expect(diffPng.data[0]).toBe(12);
+  });
+
+  test('skips the diff image when renderDiffImage is false', () => {
+    const baseline = solidPng(4, 3, [12, 34, 56, 255]);
+    const changed = solidPng(4, 3, [0, 0, 0, 255]);
+
+    const identical = compareImages(baseline, baseline, { renderDiffImage: false });
+    expect(identical.diffImageBuffer).toBeUndefined();
+    expect(identical.mismatchRatio).toBe(0);
+
+    const different = compareImages(baseline, changed, { renderDiffImage: false });
+    expect(different.diffImageBuffer).toBeUndefined();
+    expect(different.differentPixels).toBe(12);
+    expect(different.mismatchRatio).toBe(1);
+  });
+
+  test('rejects malformed ignore regions and highlight colors', () => {
+    const baseline = solidPng(2, 1, [0, 0, 0, 255]);
+
+    expect(() => compareImages(baseline, baseline, { ignoreRegions: [/** @type {any} */ ({ x: 0.5, y: 0, width: 1, height: 1 })] })).toThrow(
+      /ignoreRegions\[0\]\.x must be a safe integer/
+    );
+    expect(() => compareImages(baseline, baseline, { ignoreRegions: [/** @type {any} */ ({ x: 0, y: 0, width: -1, height: 1 })] })).toThrow(
+      /width and .height must be non-negative/
+    );
+    expect(() => compareImages(baseline, baseline, { highlightColor: /** @type {any} */ ([1, 2, 3]) })).toThrow(/highlightColor must be an array of four integers/);
   });
 });

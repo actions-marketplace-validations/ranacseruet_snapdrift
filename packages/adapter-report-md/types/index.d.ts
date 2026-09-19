@@ -5,7 +5,8 @@
 import type {
   VisualDiffSummary,
   VisualViewport,
-  VisualDiffSummary as DriftSummary
+  VisualReportSummary,
+  VisualDriftStatusSummary
 } from '@snapdrift/manifest';
 
 // --- constants.mjs ---
@@ -14,13 +15,14 @@ export const DEFAULT_SNAPDRIFT_REPO_URL: string;
 export const DEFAULT_SNAPDRIFT_ICON_URL: string;
 export const STATUS_ICONS: Readonly<Record<string, string>>;
 export const STATUS_LABELS: Readonly<Record<string, string>>;
+export function formatPercentage(ratio: number): string;
+export function formatViewport(viewport: VisualViewport | undefined): string;
 
 // --- markdown.mjs ---
 
-export function formatViewport(viewport: VisualViewport | undefined): string;
 export function makeMarkdown(summaryData: VisualDiffSummary): string;
 export function formatDriftFailureMessage(
-  diffMode: VisualDiffSummary['diff']['mode'],
+  diffMode: VisualDiffSummary['diffMode'],
   summary: { changedScreenshots?: number }
 ): string;
 
@@ -35,7 +37,7 @@ export function buildDriftSummary(options: {
   selectedRouteIds?: string[] | string;
   currentResultsPath?: string;
   baselineAvailable?: boolean;
-}): { summary: Record<string, unknown>; markdown: string };
+}): { summary: VisualDriftStatusSummary; markdown: string };
 
 // --- pr-comment.mjs ---
 
@@ -45,9 +47,10 @@ export const PR_COMMENT_MARKERS: string[];
 export function escapeMarkdown(value: unknown): string;
 
 export function buildReportCommentBody(
-  summary: Record<string, unknown>,
+  summary: VisualReportSummary,
   meta?: {
     artifactName?: string;
+    artifactUrl?: string;
     runUrl?: string;
     dashboardUrl?: string;
     maxChangedRows?: number;
@@ -62,6 +65,7 @@ export function generateHtmlReport(
   options?: {
     baselineRunDir?: string;
     currentRunDir?: string;
+    diffRunDir?: string;
     imageReader?: (runDir: string, imagePath: string) => Promise<string | null>;
   }
 ): Promise<string>;

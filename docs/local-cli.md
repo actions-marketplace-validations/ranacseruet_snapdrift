@@ -203,6 +203,61 @@ The `--open` flag opens the HTML report in your default browser when the diff is
 
 ---
 
+## Refreshing or acknowledging local baselines
+
+New local manifests record a [v2 capture profile](contracts.md#local-capture-profile-v2)
+with exact engine, Playwright/browser, OS, locale/timezone, and rendering settings.
+Manifests are validated after loading; then, before resolving PNGs, comparison
+checks the profiles and each selected route's id, exact configured path, and
+normalized viewport. A mismatch produces an
+`incompatible_capture` error and an `incomplete` summary, not a pixel drift
+signal. Matching profiles can still have route-identity errors:
+`summary.captureCompatibility.status` describes profiles only.
+
+To refresh, serve the intended accepted application state using the same capture
+environment and route config as future diffs. With `provider: "local"`, run:
+
+```bash
+snapdrift baseline --config .github/snapdrift.json --baseline-dir .snapdrift/baseline
+```
+
+This overwrites baseline metadata and captured screenshots; `snapdrift capture`
+with the same options is equivalent for the local provider. Capture all routes
+for a complete replacement, without `--routes` or `SNAPDRIFT_ROUTE_IDS` scoping.
+Then serve the candidate application state and run:
+
+```bash
+snapdrift diff --config .github/snapdrift.json --baseline-dir .snapdrift/baseline --open
+```
+
+In CI, run the existing default-branch baseline workflow using the root action's
+`mode: baseline` ([Quickstart](../README.md#quickstart)) or `actions/baseline`.
+Use the same upgraded SnapDrift/action revision and runner environment for
+baseline and PR captures, with artifact upload enabled; then rerun the PR diff.
+A baseline captured on a different OS is not interchangeable merely because
+both commands use Playwright.
+
+For intentional nonblocking acknowledgement, set `diff.mode` to `report-only`
+in the config and rerun `snapdrift diff --open`. This keeps the incompatibility
+errors visible and **never overrides compatibility to compare pixels**; there
+is no diff acceptance flag. `fail-on-incomplete` and `strict` fail on these
+errors; `fail-on-changes` fails only if other comparable routes changed. Once
+identity is compatible, a changed full-page PNG size is normal product drift,
+not incompatibility, and fails `fail-on-changes` / `strict` even below threshold.
+
+Legacy manifests with missing profiles or omitted/v1 profile schema remain
+pixel-comparable after route checks, but report `unverified` with a warning.
+Conflicting shared browser/revision, fonts hash, locale, or timezone fields, or
+an explicit foreign engine on either side, are still incompatible. Malformed
+manifests/profiles and unsupported profile schema versions abort comparison,
+even in `report-only`; refresh rather than editing metadata to force a match.
+
+Local capture now explicitly uses `en-US` and `UTC`; localized text/date changes
+may require recapture after upgrading. Fonts are not fingerprinted, so keep
+installed fonts consistent even when profiles are verified.
+
+---
+
 ## Local directory layout
 
 After running `capture` and `diff` with default paths:
@@ -225,6 +280,7 @@ After running `capture` and `diff` with default paths:
     summary.json          # structured drift summary
     summary.md            # human-readable markdown report
     report.html           # self-contained HTML report with side-by-side images
+    diffs/                # generated diff PNGs for changed routes
 ```
 
 Add `.snapdrift/` to your `.gitignore` to keep local run output out of version control.
@@ -238,7 +294,7 @@ Add `.snapdrift/` to your `.gitignore` to keep local run output out of version c
 | `0` | Clean — no drift above threshold, `diff.mode` is `report-only`, the command was intentionally skipped under `onUnavailable: "warn-and-skip"` (`diff`, `capture` and `baseline` all exit 0 in that case), or the command was a `capture` / `baseline` / `migrate-baselines --to local` / `init` that completed |
 | `1` | Drift enforced — `diff.mode` caused the run to fail, a required command argument was missing, or the `--to local` engine-name check failed (see [Drift modes](../README.md#drift-modes)) |
 
-Enforcement follows the same `diff.mode` rules as the GitHub Actions workflow. Set `"mode": "report-only"` during local development to always get a report without a failing exit code.
+Enforcement follows the same `diff.mode` rules as the GitHub Actions workflow. Set `"mode": "report-only"` for nonblocking report inspection; capture, input-validation, and other command failures still exit 1 and can prevent report generation.
 
 ---
 
@@ -271,7 +327,7 @@ Comparing against baseline ...
 Report: .snapdrift/diff/report.html
 ```
 
-**Incomplete run** (errors, missing captures, or dimension shifts):
+**Incomplete run** (errors or missing captures):
 
 ```
 ❌  SnapDrift — incomplete
@@ -280,7 +336,7 @@ Report: .snapdrift/diff/report.html
    Changed:   0
    Missing:   1
    Errors:    1
-   Dim diff:  1
+   Dim diff:  0
 
 Report: .snapdrift/diff/report.html
 ```
@@ -289,13 +345,27 @@ The `Missing`, `Errors`, and `Dim diff` lines only print when their count is gre
 
 The `report.html` path is printed whenever the status is anything other than `clean`; pass `--open` to also launch it in your default browser.
 
+SnapDrift always applies comparison policy v1. It synthesizes the policy from
+`diff.threshold` when `diff` does not declare one, so the explicit opt-in is only
+needed to pin a non-default threshold:
+
+```json
+"comparisonPolicy": { "version": 1, "threshold": 0.01 }
+```
+
+The report includes the baseline, current, and union-canvas dimensions in
+`summary.md` and `report.html`, and stores changed-route diff PNGs under
+`.snapdrift/diff/diffs/`. A completed dimension comparison is a normal changed
+signal, so `fail-on-incomplete` does not fail solely because its dimensions
+differ; `fail-on-changes` and `strict` still enforce it.
+
 ---
 
 ## Environment variables
 
 | Variable | Applies to | Description |
 |:---------|:-----------|:------------|
-| `SNAPDRIFT_CAPTURE_CONCURRENCY` | `capture`, `diff` | Max concurrent route captures per viewport context (positive integer, default `5`). Set to `1` to restore serial behavior for apps with shared session or auth state. |
+| `SNAPDRIFT_CAPTURE_CONCURRENCY` | `capture`, `diff` | Max concurrent route operations (positive integer, default `5`): route captures per viewport group, and per-route resolve/compare during `diff`. Each local capture attempt uses isolated browser storage. Set to `1` to serialize captures within each viewport group, without sharing storage. |
 | `SNAPDRIFT_CONFIG_PATH` | `capture`, `diff`, `migrate-baselines` | Override the config file path. Equivalent to `--config`. |
 | `SNAPDRIFT_ROUTE_IDS` | `capture`, `baseline`, `diff` | Comma-separated route ids to scope to. Equivalent to `--routes`; it may not reduce a hosted baseline's complete route set. |
 

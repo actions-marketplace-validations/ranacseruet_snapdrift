@@ -3,7 +3,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { compareBuffers } from '@snapdrift/compare-core';
+import { compareBuffers, compareImages } from '@snapdrift/compare-core';
 
 const fileIndexCache = new Map();
 
@@ -110,18 +110,60 @@ export async function resolveImagePath(runDir, relativeImagePath) {
 
 /**
  * Reads two PNG files from disk and compares them pixel-by-pixel.
- * Delegates pixel comparison to compareBuffers from @snapdrift/compare-core.
+ * Delegates strict comparisons to compareBuffers and policy comparisons to
+ * compareImages from @snapdrift/compare-core.
  *
+ * @overload
  * @param {string} baselinePath
  * @param {string} currentPath
- * @returns {Promise<{ width: number, height: number, differentPixels: number, totalPixels: number, mismatchRatio: number }>}
+ * @returns {Promise<import('@snapdrift/compare-core').CompareBuffersResult>}
  */
-export async function comparePngs(baselinePath, currentPath) {
+/**
+ * @overload
+ * @param {string} baselinePath
+ * @param {string} currentPath
+ * @param {{ comparisonPolicy: import('@snapdrift/manifest').ComparisonPolicy }} options
+ * @returns {Promise<import('@snapdrift/compare-core').CompareImagesResult>}
+ */
+/**
+ * @overload
+ * @param {string} baselinePath
+ * @param {string} currentPath
+ * @param {{ comparisonPolicy: import('@snapdrift/manifest').ComparisonPolicy, renderDiffImage: false }} options
+ * @returns {Promise<import('@snapdrift/compare-core').CompareImagesMetricsResult>}
+ */
+/**
+ * @overload
+ * @param {string} baselinePath
+ * @param {string} currentPath
+ * @param {{ comparisonPolicy?: import('@snapdrift/manifest').ComparisonPolicy, renderDiffImage?: boolean }} options
+ * @returns {Promise<
+ *   import('@snapdrift/compare-core').CompareBuffersResult |
+ *   import('@snapdrift/compare-core').CompareImagesResult |
+ *   import('@snapdrift/compare-core').CompareImagesMetricsResult
+ * >}
+ */
+/**
+ * @param {string} baselinePath
+ * @param {string} currentPath
+ * @param {{ comparisonPolicy?: import('@snapdrift/manifest').ComparisonPolicy, renderDiffImage?: boolean }} [options]
+ * @returns {Promise<
+ *   import('@snapdrift/compare-core').CompareBuffersResult |
+ *   import('@snapdrift/compare-core').CompareImagesResult |
+ *   import('@snapdrift/compare-core').CompareImagesMetricsResult
+ * >}
+ */
+export async function comparePngs(baselinePath, currentPath, options = {}) {
   const [baselineBuffer, currentBuffer] = await Promise.all([
     fs.readFile(baselinePath),
     fs.readFile(currentPath)
   ]);
-  return compareBuffers(baselineBuffer, currentBuffer);
+  if (!options.comparisonPolicy) {
+    return compareBuffers(baselineBuffer, currentBuffer);
+  }
+  return compareImages(baselineBuffer, currentBuffer, {
+    ...(options.renderDiffImage === undefined ? {} : { renderDiffImage: options.renderDiffImage })
+  });
 }
 
 /**

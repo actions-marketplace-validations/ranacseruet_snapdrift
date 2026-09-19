@@ -1,11 +1,11 @@
 {
   "name": "@snapdrift/compare-core",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Pure pixel-comparison engine for SnapDrift — no I/O, no filesystem, no manifest knowledge",
   "type": "module",
   "main": "src/index.mjs",
   "exports": {
-    ".": "./src/index.mjs"
+    ".": { "types": "./types/index.d.ts", "default": "./src/index.mjs" }
   },
   "types": "types/index.d.ts",
   "files": [

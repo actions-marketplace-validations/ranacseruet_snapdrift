@@ -1,13 +1,36 @@
+import type { SnapConfig } from '@snapdrift/manifest';
+
 /** Object-shaped data decoded from an external JSON or YAML boundary. */
 export type JsonObject = Record<string, any>;
 
 export type VisualViewportPreset = 'desktop' | 'mobile';
-export interface VisualCustomViewport { width: number; height: number; }
+export interface VisualCustomViewport {
+  width: number;
+  height: number;
+}
 export type VisualViewport = VisualViewportPreset | VisualCustomViewport;
 
 export interface VisualRegressionSelectionConfig {
   sharedPrefixes?: string[];
   sharedExact?: string[];
+}
+
+export interface ComparisonPolicy {
+  version: 1;
+  threshold: number;
+}
+
+export interface ComparisonDimensions {
+  width: number;
+  height: number;
+}
+
+export interface ComparisonMetadata {
+  baseline: ComparisonDimensions;
+  current: ComparisonDimensions;
+  canvas: ComparisonDimensions;
+  dimensionsChanged: boolean;
+  totalPixels: number;
 }
 
 export interface VisualRegressionRouteConfig {
@@ -29,6 +52,7 @@ export interface VisualRegressionConfig {
   diff: {
     threshold: number;
     mode: 'report-only' | 'fail-on-changes' | 'fail-on-incomplete' | 'strict';
+    comparisonPolicy?: ComparisonPolicy;
   };
   selection?: VisualRegressionSelectionConfig;
   provider?: 'local' | 'snap';
@@ -86,6 +110,8 @@ export interface SnapRunMetadata {
   runId: string;
   projectId: string;
   purpose: 'baseline' | 'capture' | 'diff';
+  /** Exact comparison policy acknowledged by Snap for updated clients. */
+  comparisonPolicy?: ComparisonPolicy;
   /** CI source branch for hosted baseline runs; omitted for ordinary diff runs. */
   refBranch?: string;
   /** Resolved 40-character CI commit for hosted baseline runs. */
@@ -139,6 +165,8 @@ export interface VisualDiffChangedItem {
   totalPixels: number;
   mismatchRatio: number;
   status: 'changed';
+  comparison?: ComparisonMetadata;
+  diffImagePath?: string;
 }
 
 export interface VisualDiffSummary {
@@ -164,7 +192,9 @@ export interface VisualDiffSummary {
   changed: VisualDiffChangedItem[];
   missing: VisualDiffMissingItem[];
   errors: VisualDiffErrorItem[];
+  captureCompatibility?: import('@snapdrift/manifest').CaptureCompatibility;
   dimensionChanges: VisualDiffDimensionItem[];
+  comparisonPolicy?: ComparisonPolicy;
   message?: string;
   /** Link to the provider's run detail page. Set by SnapProvider during diff(); undefined for LocalProvider. */
   dashboardUrl?: string;

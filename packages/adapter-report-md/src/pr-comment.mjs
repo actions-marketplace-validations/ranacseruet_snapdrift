@@ -1,6 +1,6 @@
 // @ts-check
 
-import { DEFAULT_SNAPDRIFT_REPO_URL, STATUS_ICONS, STATUS_LABELS } from './constants.mjs';
+import { DEFAULT_SNAPDRIFT_REPO_URL, STATUS_ICONS, STATUS_LABELS, formatPercentage, formatViewport } from './constants.mjs';
 
 export const PR_COMMENT_MARKER = '<!-- snapdrift-report -->';
 export const PR_COMMENT_MARKERS = [PR_COMMENT_MARKER];
@@ -12,14 +12,60 @@ export const PR_COMMENT_MARKERS = [PR_COMMENT_MARKER];
  */
 export function escapeMarkdown(value) {
   return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
     .replace(/\|/g, '\\|')
     .replace(/\[/g, '\\[')
-    .replace(/\]/g, '\\]');
+    .replace(/\]/g, '\\]')
+    .replace(/`/g, '\\`');
 }
 
 /**
- * @param {Record<string, unknown>} summary
- * @param {{ artifactName?: string, runUrl?: string, dashboardUrl?: string, maxChangedRows?: number, maxErrorRows?: number }} [meta]
+ * @param {{ width: number, height: number } | undefined} dimensions
+ * @returns {string}
+ */
+function formatDimensions(dimensions) {
+  return dimensions ? `${dimensions.width}×${dimensions.height}` : '—';
+}
+
+/**
+ * @param {import('@snapdrift/manifest').VisualDiffChangedItem[]} changed
+ * @returns {import('@snapdrift/manifest').VisualDiffChangedItem[]}
+ */
+function getComparisonDimensionChanges(changed) {
+  return changed.filter((item) => item.comparison?.dimensionsChanged);
+}
+
+/**
+ * @param {import('@snapdrift/manifest').VisualDiffChangedItem} item
+ * @returns {boolean}
+ */
+function hasComparisonDetails(item) {
+  return Boolean(item.comparison || item.diffImagePath);
+}
+
+/**
+ * @param {string | undefined} diffImagePath
+ * @param {string | undefined} artifactUrl
+ * @param {string | undefined} runUrl
+ * @returns {string}
+ */
+function formatDiffImage(diffImagePath, artifactUrl, runUrl) {
+  if (!diffImagePath) return '—';
+
+  const linkUrl = /^https?:\/\//.test(artifactUrl || '')
+    ? artifactUrl
+    : /^https?:\/\//.test(runUrl || '')
+      ? runUrl
+      : undefined;
+  const pathLabel = `\`${escapeMarkdown(diffImagePath)}\``;
+  return linkUrl ? `[View report artifacts →](${linkUrl}) ${pathLabel}` : pathLabel;
+}
+
+/**
+ * @param {import('@snapdrift/manifest').VisualReportSummary} summary
+ * @param {{ artifactName?: string, artifactUrl?: string, runUrl?: string, dashboardUrl?: string, maxChangedRows?: number, maxErrorRows?: number }} [meta]
  * @returns {string}
  */
 export function buildReportCommentBody(summary, meta = {}) {
@@ -28,8 +74,11 @@ export function buildReportCommentBody(summary, meta = {}) {
   const status = /** @type {string} */ (summary.status) || 'incomplete';
   const statusIcon = STATUS_ICONS[status] || '⚠️';
   const statusLabel = STATUS_LABELS[status] || status;
-  const dimensionChanges = /** @type {Array<Record<string, unknown>>} */ (summary.dimensionChanges) || [];
-  const errors = /** @type {Array<Record<string, unknown>>} */ (summary.errors) || [];
+  const dimensionChanges = summary.dimensionChanges || [];
+  const changed = summary.changed || [];
+  const comparisonDimensionChanges = getComparisonDimensionChanges(changed);
+  const dimensionShiftCount = dimensionChanges.length + comparisonDimensionChanges.length;
+  const errors = summary.errors || [];
   const errorCount = (/** @type {unknown[]} */ (summary.errors) || []).length;
 
   const lines = [
@@ -41,7 +90,7 @@ export function buildReportCommentBody(summary, meta = {}) {
     `| Drift signals | ${summary.changedScreenshots || 0} |`,
     `| Missing in baseline | ${summary.missingInBaseline || 0} |`,
     `| Missing in current capture | ${summary.missingInCurrent || 0} |`,
-    `| Dimension shifts | ${dimensionChanges.length} |`
+    `| Dimension shifts | ${dimensionShiftCount} |`
   ];
 
   if (summary.message) {
@@ -56,7 +105,7 @@ export function buildReportCommentBody(summary, meta = {}) {
     lines.push('| Route | Viewport | Error |');
     lines.push('|:------|:---------|:------|');
     for (const item of errors.slice(0, maxErrorRows)) {
-      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(item.viewport)} | ${escapeMarkdown(item.message)} |`);
+      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(formatViewport(item.viewport))} | ${escapeMarkdown(item.message)} |`);
     }
     if (errorCount > maxErrorRows) {
       lines.push('');
@@ -69,18 +118,25 @@ export function buildReportCommentBody(summary, meta = {}) {
     lines.push('</details>');
   }
 
-  const changed = /** @type {Array<Record<string, unknown>>} */ (summary.changed) || [];
   if (changed.length > 0) {
     lines.push('');
     lines.push('<details><summary>Drift signals</summary>');
     lines.push('');
-    lines.push('| Route | Viewport | Mismatch |');
-    lines.push('|:------|:---------|:---------|');
+    const comparisonDetails = changed.some(hasComparisonDetails);
+    if (comparisonDetails) {
+      lines.push('| Route | Viewport | Baseline | Current | Canvas | Mismatch | Pixels changed | Diff image |');
+      lines.push('|:------|:---------|:---------|:--------|:-------|:---------|:---------------|:-----------|');
+    } else {
+      lines.push('| Route | Viewport | Mismatch |');
+      lines.push('|:------|:---------|:---------|');
+    }
     for (const item of changed.slice(0, maxChangedRows)) {
-      const percentChanged = typeof item.mismatchRatio === 'number'
-        ? `${(item.mismatchRatio * 100).toFixed(2)}%`
-        : 'n/a';
-      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(item.viewport)} | ${percentChanged} |`);
+      const percentChanged = typeof item.mismatchRatio === 'number' ? formatPercentage(item.mismatchRatio) : 'n/a';
+      if (comparisonDetails) {
+        lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(formatViewport(item.viewport))} | ${formatDimensions(item.comparison?.baseline)} | ${formatDimensions(item.comparison?.current)} | ${formatDimensions(item.comparison?.canvas)} | ${percentChanged} | ${item.differentPixels ?? '—'}/${item.totalPixels ?? '—'} | ${formatDiffImage(item.diffImagePath, meta.artifactUrl, meta.runUrl)} |`);
+      } else {
+        lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(formatViewport(item.viewport))} | ${percentChanged} |`);
+      }
     }
     if (changed.length > maxChangedRows) {
       lines.push('');
@@ -93,7 +149,7 @@ export function buildReportCommentBody(summary, meta = {}) {
     lines.push('</details>');
   }
 
-  if (dimensionChanges.length > 0) {
+  if (dimensionShiftCount > 0 && comparisonDimensionChanges.length === 0) {
     lines.push('');
     lines.push('<details open><summary>Dimension shifts — comparison skipped</summary>');
     lines.push('');
@@ -104,7 +160,23 @@ export function buildReportCommentBody(summary, meta = {}) {
     lines.push('| Route | Viewport | Baseline | Current |');
     lines.push('|:------|:---------|:---------|:--------|');
     for (const item of dimensionChanges) {
-      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(item.viewport)} | ${item.baselineWidth}×${item.baselineHeight} | ${item.currentWidth}×${item.currentHeight} |`);
+      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(formatViewport(item.viewport))} | ${item.baselineWidth}×${item.baselineHeight} | ${item.currentWidth}×${item.currentHeight} |`);
+    }
+    lines.push('');
+    lines.push('</details>');
+  } else if (dimensionShiftCount > 0) {
+    lines.push('');
+    lines.push('<details open><summary>Dimension shifts — pixel comparison included</summary>');
+    lines.push('');
+    lines.push('> SnapDrift compared opted-in unequal dimensions on a top-left-aligned union canvas. One-sided pixels count as changes.');
+    lines.push('');
+    lines.push('| Route | Viewport | Baseline | Current | Canvas | Diff image |');
+    lines.push('|:------|:---------|:---------|:--------|:-------|:-----------|');
+    for (const item of dimensionChanges) {
+      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(formatViewport(item.viewport))} | ${item.baselineWidth}×${item.baselineHeight} | ${item.currentWidth}×${item.currentHeight} | — | — |`);
+    }
+    for (const item of comparisonDimensionChanges) {
+      lines.push(`| ${escapeMarkdown(item.id)} | ${escapeMarkdown(formatViewport(item.viewport))} | ${formatDimensions(item.comparison?.baseline)} | ${formatDimensions(item.comparison?.current)} | ${formatDimensions(item.comparison?.canvas)} | ${formatDiffImage(item.diffImagePath, meta.artifactUrl, meta.runUrl)} |`);
     }
     lines.push('');
     lines.push('</details>');

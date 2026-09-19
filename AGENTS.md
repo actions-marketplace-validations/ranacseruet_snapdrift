@@ -27,10 +27,10 @@ Tests require `--experimental-vm-modules` because the project uses ESM (`"type":
 ### Three integration layers
 
 1. **`packages/`** — Workspace packages. The actual implementation lives here. Each package is a standalone npm package with its own `package.json` and `tests/`. The root `snapdrift` package depends on these.
-   - `@snapdrift/manifest` — Schema, validation, route-selection logic, viewport presets. Pure, zero I/O. (v1.1.0)
-   - `@snapdrift/compare-core` — Pure pixel-comparison engine using `pngjs`. No I/O. (v1.0.0)
-   - `@snapdrift/adapter-fs` — Filesystem I/O: config loading, capture, compare, staging, drift report generation, image resolution. (v1.0.0)
-   - `@snapdrift/adapter-report-md` — Pure markdown and HTML report generators. Zero runtime dependencies. (v1.1.0)
+   - `@snapdrift/manifest` — Schema, validation, route-selection logic, viewport presets. Pure, zero I/O. (v1.4.0)
+   - `@snapdrift/compare-core` — Pure pixel-comparison engine using `pngjs`. No I/O. Exports strict `compareBuffers` plus union-canvas `compareImages` (byte-equality fast path, optional `renderDiffImage`, input validation), `generateDiffImage`, and `compareWithIgnoreRegions`. (v1.2.0)
+   - `@snapdrift/adapter-fs` — Filesystem I/O: config loading, capture, compare, staging, drift report generation, image resolution. (v1.3.0)
+   - `@snapdrift/adapter-report-md` — Pure markdown and HTML report generators. Depends on `@snapdrift/manifest`. (v1.2.0)
 
 2. **`lib/`** — Thin re-export shims over the workspace packages. Preserved for backward compatibility with downstream callers that import `lib/capture-routes.mjs` etc. directly. New consumers should import from the workspace packages or from the `package.json` `exports` map.
    - `snapdrift-config.mjs` — Re-exports from `@snapdrift/manifest` and `@snapdrift/adapter-fs`
@@ -41,11 +41,13 @@ Tests require `--experimental-vm-modules` because the project uses ESM (`"type":
    - `pr-comment.mjs` — Re-exports `buildReportCommentBody`, `PR_COMMENT_MARKER[S]`, `escapeMarkdown`
    - `report.mjs` — Wires the default filesystem `imageReader` for HTML reports
    - `cli.mjs` — CLI entry point: `parseArgs` + command dispatch for `capture`, `baseline`, `diff`, `migrate-baselines`, `init`. `baseline` is the only CLI path that publishes a baseline to Snap (capture + `publishBaseline`)
-   - `provider.mjs` — `createProvider(name, config)` factory + `LocalProvider` implementation; re-exports `SnapProvider` and the four Snap error classes from `snap-provider.mjs`
-   - `outage-policy.mjs` — single implementation of `snap.onUnavailable` (`captureWithPolicy`, `diffWithPolicy`, `publishBaselineWithPolicy`), used by `cli.mjs`, `actions/baseline` and `actions/pr-diff`. Returns the *effective* provider after a `fallback-local` switch and recaptures locally when a remote Snap capture has no PNGs to pixel-compare
+   - `provider.mjs` — `createProvider(name, config)` factory + `LocalProvider` implementation; `PROVIDER_CAPABILITIES` + `providerSupports(name, capability)` capability query (local has no `fetchLatestBaseline`); re-exports `SnapProvider` and the four Snap error classes from `snap-provider.mjs`
+   - `outage-policy.mjs` — single implementation of `snap.onUnavailable` (`captureWithPolicy`, `diffWithPolicy`, `publishBaselineWithPolicy`), used by `cli.mjs`, `actions/baseline` and `actions/pr-diff`. Returns the *effective* provider after a `fallback-local` switch, describes capture artifacts explicitly (`describeCaptureArtifacts`: `localScreenshots` + `artifactsRoot`), and recaptures locally when a remote Snap capture has no PNGs to pixel-compare
+   - `github-requests.mjs` — dependency-injected GitHub request helpers shared by github-script action steps: `fetchPullRequestFiles`, `resolveScopeDecision`, `resolvePullRequestScope` (scope parity between `actions/scope` and `actions/pr-diff`), and `upsertPullRequestReportComment` (marker-based comment upsert shared by `actions/comment` and the `actions/pr-diff` report step)
    - `snap-provider.mjs` — `SnapProvider` (hosted `VisualProvider` with `capture`/`diff`/`publishBaseline` (requires a Snap run id; no legacy bundle path)/`fetchLatestBaseline`/`buildCommentBody`) + migration methods (`exportBaselines`, `checkBaselineExists`; `migrateBaselineFromLocal` removed in 0.7.0 — Snap rejects that body) + `SnapApiError` / `SnapUnavailableError` / `SnapFallbackError` / `SnapSkipError` / `isLocalBaseUrl`
    - `migrate-baselines.mjs` — `migrate-baselines` command handlers (`runMigrateToSnap`, `runMigrateToLocal`)
    - `init-from-action.mjs` — `init --from-snap-action` codemod: translates Snap action workflow YAML to `snapdrift.json`
+   - `resolve-baseline-artifact.mjs` — shared GitHub workflow/artifact lookup and response validation used by both baseline resolver actions
 
 3. **`actions/`** — GitHub composite actions. Two primary wrapper actions orchestrate the full pipeline:
    - `actions/baseline` — Reads config → installs deps → captures routes → publishes (via `provider.publishBaseline`) → stages bundle → uploads artifact
@@ -55,7 +57,8 @@ Tests require `--experimental-vm-modules` because the project uses ESM (`"type":
    - `actions/capture` — capture routes and emit `results.json` + `manifest.json`
    - `actions/compare` — diff current capture against a baseline
    - `actions/scope` — decide whether to run and which routes to select from changed files
-   - `actions/resolve-baseline` — find and download the latest successful baseline artifact
+   - `actions/resolve-baseline` — find and download the latest successful baseline artifact;
+     its `resolution-status` output is `found`, `missing`, or `error`, and lookup errors fail the action
    - `actions/stage` — assemble a baseline or diff bundle for upload
    - `actions/enforce` — evaluate the summary against `diff.mode` and fail when required
    - `actions/comment` — upsert a PR comment from a summary (provider-aware)
@@ -107,7 +110,10 @@ Tests in `tests/` and `packages/*/tests/` use Jest with `"transform": {}` (no tr
 | `tests/pr-comment.test.js` | PR comment body construction (local and snap link variants) |
 | `tests/provider.test.js` | `createProvider` factory and `LocalProvider` |
 | `tests/snap-provider.test.js` | `SnapProvider` capture/diff/publish paths, local-capture hybrid, retry, error classification |
+| `tests/scope-action.test.js` | Executable `scope` and `pr-diff` changed-file selection, rename paths, truncation, malformed responses, and scope fallbacks |
 | `tests/snapdrift-actions-contract.test.js` | Action YAML structure, wrapper action inputs/outputs, viewport preset contract, provider wiring |
+| `tests/github-requests.test.js` | Shared GitHub request helpers: changed-file validation, scope decisions, truncation, comment upsert ordering |
+| `tests/comment-action.test.js` | Executable `comment` and `pr-diff` report adapters: body parity, truncation limits, config-fallback warning, missing-summary fallback body |
 | `tests/snapdrift-config.test.js` | `snapdrift-config` shim exports |
 | `tests/report.test.js` | HTML report image embedding |
 | `tests/migrate-baselines.test.js` | Migration command parsing, `runMigrateToSnap` retirement, `runMigrateToLocal` engine validation |
