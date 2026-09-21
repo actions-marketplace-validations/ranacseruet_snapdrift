@@ -226,6 +226,32 @@ describe('buildReportCommentBody', () => {
     expect(body).toContain('| home-mobile | 390x844 |');
   });
 
+  it('escapes route ids in v2 alignment notes', () => {
+    const body = buildReportCommentBody({
+      ...cleanSummary,
+      status: 'changes-detected',
+      changedScreenshots: 1,
+      changed: [{
+        id: '<unsafe|route>',
+        viewport: 'desktop',
+        mismatchRatio: 0.1,
+        comparison: {
+          baseline: { width: 1, height: 1 },
+          current: { width: 1, height: 2 },
+          canvas: { width: 1, height: 2 },
+          dimensionsChanged: true,
+          totalPixels: 2,
+          policyVersion: 2,
+          mode: 'vertical-aligned',
+          rowMapping: [{ outputStart: 0, length: 2, kind: 'inserted', currentStart: 0 }]
+        }
+      }]
+    });
+
+    expect(body).toContain('vertical row alignment: &lt;unsafe\\|route&gt;');
+    expect(body).not.toContain('vertical row alignment: <unsafe|route>');
+  });
+
   it('formats an object viewport in the opted-in unequal-dimension shifts table', () => {
     const body = buildReportCommentBody({
       ...cleanSummary,
@@ -290,6 +316,42 @@ describe('buildReportCommentBody', () => {
     expect(body).toContain('route-4');
     expect(body).not.toContain('route-5');
     expect(body).toContain('...and 5 more');
+  });
+
+  it('truncates alignment notes with changed rows and reports omitted notes', () => {
+    const body = buildReportCommentBody(
+      {
+        ...cleanSummary,
+        status: 'changes-detected',
+        changedScreenshots: 3,
+        changed: [
+          {
+            id: 'visible-route',
+            viewport: 'desktop',
+            mismatchRatio: 0.01,
+            comparison: { mode: 'vertical-aligned' }
+          },
+          {
+            id: 'hidden-aligned-route',
+            viewport: 'desktop',
+            mismatchRatio: 0.01,
+            comparison: { mode: 'vertical-aligned' }
+          },
+          {
+            id: 'hidden-fallback-route',
+            viewport: 'desktop',
+            mismatchRatio: 0.01,
+            comparison: { mode: 'coordinate-fallback', fallbackReason: 'ambiguous' }
+          }
+        ]
+      },
+      { maxChangedRows: 1 }
+    );
+
+    expect(body).toContain('vertical row alignment: visible-route');
+    expect(body).not.toContain('hidden-aligned-route');
+    expect(body).not.toContain('hidden-fallback-route');
+    expect(body).toContain('2 additional alignment notes omitted; see full report');
   });
 
   it('respects custom maxErrorRows limit', () => {

@@ -6,6 +6,10 @@ import {
   splitCommaList,
   VALID_DIFF_MODES,
   COMPARISON_POLICY_VERSION,
+  LATEST_COMPARISON_POLICY_VERSION,
+  SUPPORTED_COMPARISON_POLICY_VERSIONS,
+  COMPARISON_ROW_KINDS,
+  COMPARISON_FALLBACK_REASONS,
   SNAPDRIFT_NAVIGATION_TIMEOUT_MS,
   SNAPDRIFT_SETTLE_DELAY_MS
 } from '../src/config.mjs';
@@ -137,10 +141,21 @@ describe('@snapdrift/manifest — validateSnapdriftConfig', () => {
       ...VALID_CONFIG,
       diff: {
         ...VALID_CONFIG.diff,
-        comparisonPolicy: { version: 2, threshold: 0.01 }
+        comparisonPolicy: { version: 3, threshold: 0.01 }
       }
     };
     expect(() => validateSnapdriftConfig(copy)).toThrow('diff.comparisonPolicy.version');
+  });
+
+  test('accepts opt-in v2 row-aligned comparison policy', () => {
+    const copy = {
+      ...VALID_CONFIG,
+      diff: {
+        ...VALID_CONFIG.diff,
+        comparisonPolicy: { version: 2, threshold: 0.01 }
+      }
+    };
+    expect(validateSnapdriftConfig(copy).diff.comparisonPolicy).toEqual({ version: 2, threshold: 0.01 });
   });
 
   test('rejects an invalid comparison policy threshold', () => {
@@ -249,8 +264,12 @@ describe('@snapdrift/manifest — constants', () => {
     expect(VALID_DIFF_MODES).toContain('strict');
   });
 
-  test('comparison policy version is v1', () => {
+  test('comparison policy v1 remains the deprecated compatibility default', () => {
     expect(COMPARISON_POLICY_VERSION).toBe(1);
+    expect(LATEST_COMPARISON_POLICY_VERSION).toBe(2);
+    expect(SUPPORTED_COMPARISON_POLICY_VERSIONS).toEqual([1, 2]);
+    expect(COMPARISON_ROW_KINDS).toEqual(['matched', 'changed', 'inserted', 'deleted']);
+    expect(COMPARISON_FALLBACK_REASONS).toEqual(['width-mismatch', 'alignment-limit', 'ambiguous', 'verification-failed', 'ignore-regions']);
   });
 
   test('SNAPDRIFT_NAVIGATION_TIMEOUT_MS is positive', () => {

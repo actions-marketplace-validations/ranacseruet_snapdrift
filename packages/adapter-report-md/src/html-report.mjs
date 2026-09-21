@@ -1,6 +1,7 @@
 // @ts-check
 
 import { DEFAULT_SNAPDRIFT_REPO_URL, DIFF_IMAGE_LEGEND, formatPercentage, formatViewport } from './constants.mjs';
+import { getAlignmentNotes } from './alignment-notes.mjs';
 
 /** @typedef {import('../../manifest/types/index').VisualDiffSummary} DriftSummary */
 
@@ -39,6 +40,14 @@ function hasComparisonDetails(item) {
  */
 function hasSemanticDiffImage(item) {
   return Boolean(item.diffImagePath);
+}
+
+/** @param {DriftSummary['changed']} changed @returns {string} */
+function formatAlignmentNote(changed) {
+  const notes = getAlignmentNotes(changed).map((note) => note.kind === 'aligned'
+    ? `vertical row alignment: ${note.routeIds.map(escapeHtml).join(', ')}`
+    : `coordinate fallback: ${note.routes.map(({ id, reason }) => `${escapeHtml(id)} (${escapeHtml(reason)})`).join(', ')}`);
+  return notes.length > 0 ? ` <p class="comparison-alignment">Comparison alignment — ${notes.join('; ')}.</p>` : '';
 }
 
 /**
@@ -150,7 +159,7 @@ export async function generateHtmlReport(summary, options = {}) {
     changedHtml = `<table>
       <thead><tr><th>Route</th><th>Path</th><th>Viewport</th>${comparisonDetails ? '<th>Baseline</th><th>Current</th><th>Canvas</th>' : ''}<th>Mismatch</th><th>Pixels changed</th>${comparisonDetails ? '<th>Diff image</th>' : ''}</tr></thead>
       <tbody>${rows.join('')}</tbody>
-    </table>${comparisonDetails && semanticDiff ? `<p class="diff-legend"><sub>${escapeHtml(DIFF_IMAGE_LEGEND)}</sub></p>` : ''}`;
+    </table>${comparisonDetails && semanticDiff ? `<p class="diff-legend"><sub>${escapeHtml(DIFF_IMAGE_LEGEND)}</sub></p>` : ''}${formatAlignmentNote(summary.changed)}`;
   }
 
   // --- Capture gaps ---
