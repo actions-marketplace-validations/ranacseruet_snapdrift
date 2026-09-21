@@ -1,6 +1,7 @@
 // @ts-check
 
 import { DEFAULT_SNAPDRIFT_REPO_URL, DIFF_IMAGE_LEGEND, STATUS_ICONS, STATUS_LABELS, formatPercentage, formatViewport } from './constants.mjs';
+import { getAlignmentNotes } from './alignment-notes.mjs';
 
 export const PR_COMMENT_MARKER = '<!-- snapdrift-report -->';
 export const PR_COMMENT_MARKERS = [PR_COMMENT_MARKER];
@@ -56,6 +57,13 @@ function hasComparisonDetails(item) {
  */
 function hasSemanticDiffImage(item) {
   return Boolean(item.diffImagePath);
+}
+
+/** @param {import('@snapdrift/manifest').VisualDiffChangedItem[]} changed @returns {string[]} */
+function formatAlignmentNotes(changed) {
+  return getAlignmentNotes(changed).map((note) => note.kind === 'aligned'
+    ? `vertical row alignment: ${note.routeIds.map(escapeMarkdown).join(', ')}`
+    : `coordinate fallback: ${note.routes.map(({ id, reason }) => `${escapeMarkdown(id)} (${escapeMarkdown(reason)})`).join(', ')}`);
 }
 
 /**
@@ -162,6 +170,19 @@ export function buildReportCommentBody(summary, meta = {}) {
       lines.push('');
       lines.push(`<sub>${DIFF_IMAGE_LEGEND}</sub>`);
     }
+    const displayedChanged = changed.slice(0, maxChangedRows);
+    const alignmentNotes = formatAlignmentNotes(displayedChanged);
+    const omittedAlignmentCount = changed
+      .slice(maxChangedRows)
+      .filter((item) => item.comparison?.mode === 'vertical-aligned' || item.comparison?.mode === 'coordinate-fallback')
+      .length;
+    if (alignmentNotes.length > 0 || omittedAlignmentCount > 0) {
+      if (omittedAlignmentCount > 0) {
+        alignmentNotes.push(`${omittedAlignmentCount} additional alignment ${omittedAlignmentCount === 1 ? 'note' : 'notes'} omitted; see full report`);
+      }
+      lines.push('');
+      lines.push(`> Comparison alignment — ${alignmentNotes.join('; ')}.`);
+    }
     lines.push('');
     lines.push('</details>');
   }
@@ -185,7 +206,12 @@ export function buildReportCommentBody(summary, meta = {}) {
     lines.push('');
     lines.push('<details open><summary>Dimension shifts — pixel comparison included</summary>');
     lines.push('');
-    lines.push('> SnapDrift compared opted-in unequal dimensions on a top-left-aligned union canvas. One-sided pixels count as changes.');
+    const dimensionModes = new Set(comparisonDimensionChanges.map((item) => item.comparison?.mode).filter(Boolean));
+    if (dimensionModes.size === 0) {
+      lines.push('> SnapDrift compared opted-in unequal dimensions on a top-left-aligned union canvas. One-sided pixels count as changes.');
+    } else {
+      lines.push('> SnapDrift compared opted-in unequal dimensions and records whether vertical row alignment or coordinate fallback was used. One-sided pixels count as changes.');
+    }
     if (comparisonDimensionChanges.some(hasSemanticDiffImage)) {
       lines.push(`> ${DIFF_IMAGE_LEGEND}`);
     }

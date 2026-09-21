@@ -15,10 +15,18 @@ export interface VisualRegressionSelectionConfig {
   sharedExact?: string[];
 }
 
-export interface ComparisonPolicy {
+/** @deprecated Coordinate-based comparison policy. Retained for existing configurations; use `ComparisonPolicyV2` for new configurations. */
+export interface ComparisonPolicyV1 {
   version: 1;
   threshold: number;
 }
+
+export interface ComparisonPolicyV2 {
+  version: 2;
+  threshold: number;
+}
+
+export type ComparisonPolicy = ComparisonPolicyV1 | ComparisonPolicyV2;
 
 export interface ComparisonDimensions {
   width: number;
@@ -31,6 +39,22 @@ export interface ComparisonMetadata {
   canvas: ComparisonDimensions;
   dimensionsChanged: boolean;
   totalPixels: number;
+  policyVersion?: 2;
+  mode?: 'vertical-aligned' | 'coordinate-fallback';
+  rowMapping?: ComparisonRowMapping[];
+  fallbackReason?: ComparisonFallbackReason;
+}
+
+export type ComparisonFallbackReason = 'width-mismatch' | 'alignment-limit' | 'ambiguous' | 'verification-failed' | 'ignore-regions';
+export const COMPARISON_FALLBACK_REASONS: readonly ['width-mismatch', 'alignment-limit', 'ambiguous', 'verification-failed', 'ignore-regions'];
+export type ComparisonRowKind = 'matched' | 'changed' | 'inserted' | 'deleted';
+export const COMPARISON_ROW_KINDS: readonly ['matched', 'changed', 'inserted', 'deleted'];
+export interface ComparisonRowMapping {
+  outputStart: number;
+  length: number;
+  kind: ComparisonRowKind;
+  baselineStart?: number;
+  currentStart?: number;
 }
 
 export interface VisualRegressionRouteConfig {
@@ -52,6 +76,7 @@ export interface VisualRegressionConfig {
   diff: {
     threshold: number;
     mode: 'report-only' | 'fail-on-changes' | 'fail-on-incomplete' | 'strict';
+    /** Deprecated v1 remains the compatibility default; new configurations should use v2. */
     comparisonPolicy?: ComparisonPolicy;
   };
   selection?: VisualRegressionSelectionConfig;
@@ -110,7 +135,7 @@ export interface SnapRunMetadata {
   runId: string;
   projectId: string;
   purpose: 'baseline' | 'capture' | 'diff';
-  /** Exact comparison policy acknowledged by Snap for updated clients. */
+  /** Exact comparison policy acknowledged by Snap; v1 is deprecated for compatibility. */
   comparisonPolicy?: ComparisonPolicy;
   /** CI source branch for hosted baseline runs; omitted for ordinary diff runs. */
   refBranch?: string;
@@ -194,6 +219,7 @@ export interface VisualDiffSummary {
   errors: VisualDiffErrorItem[];
   captureCompatibility?: import('@snapdrift/manifest').CaptureCompatibility;
   dimensionChanges: VisualDiffDimensionItem[];
+  /** The exact policy used for the comparison; v1 is deprecated and retained for compatibility. */
   comparisonPolicy?: ComparisonPolicy;
   message?: string;
   /** Link to the provider's run detail page. Set by SnapProvider during diff(); undefined for LocalProvider. */

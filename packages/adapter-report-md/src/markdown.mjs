@@ -2,6 +2,7 @@
 
 import { DEFAULT_SNAPDRIFT_ICON_URL, DEFAULT_SNAPDRIFT_REPO_URL, DIFF_IMAGE_LEGEND, STATUS_ICONS, STATUS_LABELS, formatPercentage, formatViewport } from './constants.mjs';
 import { escapeMarkdown } from './pr-comment.mjs';
+import { getAlignmentNotes } from './alignment-notes.mjs';
 
 /** @typedef {import('../../manifest/types/index').VisualDiffSummary} DriftSummary */
 /** @typedef {import('../../manifest/types/index').VisualDiffSummary['diffMode']} DriftMode */
@@ -43,6 +44,13 @@ function hasComparisonDetails(item) {
  */
 function hasSemanticDiffImage(item) {
   return Boolean(item.diffImagePath);
+}
+
+/** @param {DriftSummary['changed']} changed @returns {string[]} */
+function formatAlignmentNotes(changed) {
+  return getAlignmentNotes(changed).map((note) => note.kind === 'aligned'
+    ? `vertical row alignment: ${note.routeIds.map(escapeMarkdown).join(', ')}`
+    : `coordinate fallback: ${note.routes.map(({ id, reason }) => `${escapeMarkdown(id)} (${escapeMarkdown(reason)})`).join(', ')}`);
 }
 
 /**
@@ -130,6 +138,11 @@ export function makeMarkdown(summaryData) {
       lines.push('');
       lines.push(`<sub>${DIFF_IMAGE_LEGEND}</sub>`);
     }
+    const alignmentNotes = formatAlignmentNotes(summaryData.changed);
+    if (alignmentNotes.length > 0) {
+      lines.push('');
+      lines.push(`> Comparison alignment — ${alignmentNotes.join('; ')}.`);
+    }
   }
 
   lines.push('');
@@ -164,7 +177,12 @@ export function makeMarkdown(summaryData) {
     }
   } else {
     lines.push('');
-    lines.push('> Pixel comparison included for opted-in unequal dimensions on a top-left-aligned union canvas.');
+    const dimensionModes = new Set(comparisonDimensionChanges.map((item) => item.comparison?.mode).filter(Boolean));
+    if (dimensionModes.size === 0) {
+      lines.push('> Pixel comparison included for opted-in unequal dimensions on a top-left-aligned union canvas.');
+    } else {
+      lines.push('> Pixel comparison included for opted-in unequal dimensions. The report records whether vertical row alignment or coordinate fallback was used.');
+    }
     lines.push('>');
     lines.push('> One-sided pixels count as changes, while `diff.comparisonPolicy.threshold` remains the per-route aggregation threshold.');
     if (comparisonDimensionChanges.some(hasSemanticDiffImage)) {
