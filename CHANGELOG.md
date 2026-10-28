@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- `@snapdrift/compare-core`: policy v2 (`alignment: 'vertical'`) no longer falls back to coordinate comparison with `fallbackReason: 'ambiguous'` just because a page grew by rows that match repeated card padding or background rows elsewhere in the image. An unmatched row now counts as ambiguous only when it occurs fewer than `MIN_STRUCTURAL_ROW_REPEATS` (16, newly exported) times on either side. On a real 1440x3386 page screenshot pair where one card grew by 22 rows, this took the reported drift from 10.83% in coordinate fallback to 1.43% aligned.
+
 ## 0.16.1 - 2026-10-27
 
 Workspace releases this version:
