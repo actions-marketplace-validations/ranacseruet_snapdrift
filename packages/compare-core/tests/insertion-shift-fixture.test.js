@@ -67,8 +67,12 @@ describe('insertion-shift fixture', () => {
       lowerHighlights: 0,
       localGapKind: 'changed'
     });
-    expect(report.differentPixels).toBeGreaterThan(200_000);
-    expect(report.differentPixels).toBeLessThan(500_000);
+    // Blank spacer rows are structural, not content: the deletion paints its
+    // 23 ink rows and the insertion its 20 ink rows, so the measured change is
+    // the content pixels plus the glyph and local-gap residuals, not the full
+    // 90 deleted and 112 inserted rows.
+    expect(report.differentPixels).toBeGreaterThan(60_000);
+    expect(report.differentPixels).toBeLessThan(100_000);
     expect(report.totalPixels).toBe(report.canvas.width * report.canvas.height);
     expect(report.outputCursor).toBe(report.canvas.height);
     expect(report.orangeGlyph).toBeGreaterThanOrEqual(6);
@@ -459,5 +463,213 @@ describe('synthetic alignment cases', () => {
       options
     );
     expect(pairedOffsets(shifted).every((offset) => offset >= 0 && offset <= 2)).toBe(true);
+  });
+
+  test('a compensating band of duplicate fill rows is structural, not inserted or deleted content', () => {
+    const options = {
+      renderDiffImage: true,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.structuralDuplicateBand.baseline);
+    const current = PNG.sync.read(cases.structuralDuplicateBand.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // Identical text rows shift by three, so only the compensating fill bands
+    // are one-sided. They duplicate rows the plan already claims, so nothing is
+    // painted: the band is a rendering duplicate, not a new or deleted line.
+    expect(aligned.result.differentPixels).toBe(0);
+    const mapping = aligned.result.comparison.rowMapping ?? [];
+    expect(mapping.filter((segment) => segment.kind === 'inserted').map((segment) => segment.length)).toEqual([3, 3]);
+    expect(mapping.filter((segment) => segment.kind === 'deleted').map((segment) => segment.length)).toEqual([2]);
+    expect(mapping.some((segment) => segment.kind === 'changed')).toBe(false);
+
+    const diff = PNG.sync.read(/** @type {Buffer} */ (aligned.result.diffImageBuffer));
+    let added = 0;
+    let removed = 0;
+    let changed = 0;
+    for (let index = 0; index < diff.data.length; index += 4) {
+      const pixel = [diff.data[index], diff.data[index + 1], diff.data[index + 2]];
+      if (pixel[0] === options.addedColor[0] && pixel[1] === options.addedColor[1] && pixel[2] === options.addedColor[2]) added += 1;
+      else if (pixel[0] === options.removedColor[0] && pixel[1] === options.removedColor[1] && pixel[2] === options.removedColor[2]) removed += 1;
+      else if (pixel[0] === options.changedColor[0] && pixel[1] === options.changedColor[1] && pixel[2] === options.changedColor[2]) changed += 1;
+    }
+    expect({ added, removed, changed }).toEqual({ added: 0, removed: 0, changed: 0 });
+  });
+
+  test('one-sided duplicate evidence is content, not displacement', () => {
+    const options = {
+      renderDiffImage: true,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.localizedDisplacement.baseline);
+    const current = PNG.sync.read(cases.localizedDisplacement.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // Four mismatched pixels in row 3 equal a claimed current row one offset
+    // away (foreground evidence), but the old baseline pixels they replace do
+    // not exist anywhere in a claimed current row. Without background evidence
+    // the mark is new content: fewer than CONTENT_INK_MIN pixels cannot excuse
+    // a suppression, so the row paints four orange pixels.
+    expect(aligned.result.differentPixels).toBe(4);
+    const mapping = aligned.result.comparison.rowMapping ?? [];
+    expect(mapping.map((segment) => segment.kind)).toEqual(['matched', 'changed', 'matched']);
+    expect(mapping.map((segment) => segment.length)).toEqual([3, 1, 2]);
+    const diff = PNG.sync.read(/** @type {Buffer} */ (aligned.result.diffImageBuffer));
+    let changed = 0;
+    for (let index = 0; index < diff.data.length; index += 4) {
+      if (diff.data[index] === options.changedColor[0] && diff.data[index + 1] === options.changedColor[1] && diff.data[index + 2] === options.changedColor[2]) changed += 1;
+    }
+    expect(changed).toBe(4);
+  });
+
+  test('a one-sided mismatched run bordering unexplained content stays painted with that content', () => {
+    const options = {
+      renderDiffImage: false,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.localizedDisplacementBordered.baseline);
+    const current = PNG.sync.read(cases.localizedDisplacementBordered.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // Row 3's four displaced pixels border row 4, whose three mismatches find
+    // no claimed duplicate anywhere within the window. A suppression there
+    // would drop part of a real edit, so both rows paint: 4 + 3 pixels.
+    expect(aligned.result.differentPixels).toBe(7);
+  });
+
+  test('sixteen one-sided duplicates on one row are a structured recolor, not displacement', () => {
+    const options = {
+      renderDiffImage: false,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.localizedDisplacementWide.baseline);
+    const current = PNG.sync.read(cases.localizedDisplacementWide.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // Sixteen pixels all duplicate a claimed row at the same offset, but the
+    // count reaches CONTENT_INK_MIN, so the row is a glyph or region recolor.
+    // Displacement suppression must not swallow structured edits.
+    expect(aligned.result.differentPixels).toBe(16);
+  });
+
+  test('a displacement whose mismatches carry both background and foreground evidence stays matched', () => {
+    const options = {
+      renderDiffImage: false,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.displacementBothSides.baseline);
+    const current = PNG.sync.read(cases.displacementBothSides.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // The glyph marker moved one row down: row 3 and row 4 each have four
+    // mismatched pixels. Every mismatch has both a claimed current-side
+    // background copy and a claimed baseline-side foreground copy at the same
+    // ±1 offset, and the two-row run borders matched rows, so both rows are
+    // rendering displacement and the pair reports no differences.
+    expect(aligned.result.differentPixels).toBe(0);
+    const mapping = aligned.result.comparison.rowMapping ?? [];
+    expect(mapping.map((segment) => segment.kind)).toEqual(['matched']);
+    expect(mapping.map((segment) => segment.length)).toEqual([6]);
+  });
+
+  test('a both-sided displacement run bordering unexplained content stays painted with that content', () => {
+    const options = {
+      renderDiffImage: false,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.displacementBordered.baseline);
+    const current = PNG.sync.read(cases.displacementBordered.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // The two displaced rows have full evidence (4 + 4 pixels), but row 5's
+    // three unexplained mismatches border the run. Suppression would drop part
+    // of a real edit, so the run paints with it: 8 + 3 pixels.
+    expect(aligned.result.differentPixels).toBe(11);
+    const mapping = aligned.result.comparison.rowMapping ?? [];
+    expect(mapping.map((segment) => segment.kind)).toEqual(['matched', 'changed']);
+    expect(mapping.map((segment) => segment.length)).toEqual([3, 3]);
+  });
+
+  test('a both-sided 16-pixel displacement is a structured recolor, not displacement', () => {
+    const options = {
+      renderDiffImage: false,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.displacementWide.baseline);
+    const current = PNG.sync.read(cases.displacementWide.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // The wide glyph marker moved one row down and carries both evidence on
+    // each row. Each row's mismatch count reaches CONTENT_INK_MIN (16), so both
+    // rows are structured recolors and paint: 16 + 16 pixels.
+    expect(aligned.result.differentPixels).toBe(32);
+    const mapping = aligned.result.comparison.rowMapping ?? [];
+    expect(mapping.map((segment) => segment.kind)).toEqual(['matched', 'changed', 'matched']);
+    expect(mapping.map((segment) => segment.length)).toEqual([3, 2, 1]);
+  });
+
+  test('a new small mark on a uniform background stays painted because its foreground has no baseline copy', () => {
+    const options = {
+      renderDiffImage: true,
+      changedColor: /** @type {const} */ ([255, 140, 0, 255]),
+      addedColor: /** @type {const} */ ([0, 170, 0, 255]),
+      removedColor: /** @type {const} */ ([255, 0, 0, 255]),
+      maxPixels: 32 * 1024 * 1024
+    };
+    const baseline = PNG.sync.read(cases.smallMarkUniformBackground.baseline);
+    const current = PNG.sync.read(cases.smallMarkUniformBackground.current);
+    const aligned = compareOffsetAligned(baseline, current, options);
+    expect(aligned.kind).toBe('aligned');
+    if (aligned.kind !== 'aligned') return;
+
+    // Six black pixels were added on row 3 of uniform white rows. The old white
+    // background exists in claimed current rows one offset away, but the new
+    // black foreground exists nowhere in the baseline. A background-only
+    // duplicate must not suppress it: six pixels stay orange.
+    expect(aligned.result.differentPixels).toBe(6);
+    const mapping = aligned.result.comparison.rowMapping ?? [];
+    expect(mapping.map((segment) => segment.kind)).toEqual(['matched', 'changed', 'matched']);
+    expect(mapping.map((segment) => segment.length)).toEqual([3, 1, 2]);
+    const diff = PNG.sync.read(/** @type {Buffer} */ (aligned.result.diffImageBuffer));
+    let changed = 0;
+    for (let index = 0; index < diff.data.length; index += 4) {
+      if (diff.data[index] === options.changedColor[0] && diff.data[index + 1] === options.changedColor[1] && diff.data[index + 2] === options.changedColor[2]) changed += 1;
+    }
+    expect(changed).toBe(6);
   });
 });
