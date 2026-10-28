@@ -1,4 +1,7 @@
-import { runBaselineCapture, assertNavigationOk } from '../src/capture.mjs';
+import pngjs from 'pngjs';
+import { runBaselineCapture, assertNavigationOk, readPngDimensions } from '../src/capture.mjs';
+
+const { PNG } = pngjs;
 
 describe('@snapdrift/adapter-fs — capture', () => {
   test('runBaselineCapture is exported as a function', () => {
@@ -28,6 +31,37 @@ describe('@snapdrift/adapter-fs — capture', () => {
 
     test('passes when response is null (non-navigation scheme, e.g. about:blank)', () => {
       expect(() => assertNavigationOk(null, route, url)).not.toThrow();
+    });
+  });
+
+  describe('readPngDimensions', () => {
+    test('reads width and height from a real PNG without decoding it', () => {
+      const png = new PNG({ width: 7, height: 13 });
+      expect(readPngDimensions(PNG.sync.write(png))).toEqual({ width: 7, height: 13 });
+    });
+
+    test('rejects a buffer shorter than the IHDR chunk', () => {
+      const png = PNG.sync.write(new PNG({ width: 2, height: 2 }));
+      expect(() => readPngDimensions(png.subarray(0, 20))).toThrow(/not a valid PNG/);
+    });
+
+    test('rejects a buffer without the PNG signature', () => {
+      expect(() => readPngDimensions(Buffer.alloc(64))).toThrow(/not a valid PNG/);
+    });
+
+    test.each([
+      ['width', 16],
+      ['height', 20]
+    ])('rejects a PNG header declaring zero %s', (_label, offset) => {
+      const png = PNG.sync.write(new PNG({ width: 2, height: 2 }));
+      png.writeUInt32BE(0, offset);
+      expect(() => readPngDimensions(png)).toThrow(/invalid dimensions/);
+    });
+
+    test('rejects a PNG whose first chunk is not IHDR', () => {
+      const png = PNG.sync.write(new PNG({ width: 2, height: 2 }));
+      png.write('IDAT', 12, 'ascii');
+      expect(() => readPngDimensions(png)).toThrow(/not a valid PNG/);
     });
   });
 });

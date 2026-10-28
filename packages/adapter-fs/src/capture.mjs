@@ -6,7 +6,6 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import pngjs from 'pngjs';
 
 import { loadSnapdriftConfig, readFirstDefinedEnv, SNAPDRIFT_CAPTURE_CONCURRENCY } from './config.mjs';
 import { createConcurrencyLimiter } from './concurrency.mjs';
@@ -23,7 +22,6 @@ import {
   validateCaptureProfile
 } from '@snapdrift/manifest';
 
-const { PNG } = pngjs;
 const require = createRequire(import.meta.url);
 const engineVersion = require('../package.json').version;
 const playwrightVersion = require('playwright/package.json').version;
@@ -74,6 +72,37 @@ export function assertNavigationOk(response, route, targetUrl) {
       `refusing to capture an error page as a screenshot. Check the route path/baseUrl.`
     );
   }
+}
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_IHDR_END = 24;
+
+/**
+ * Reads width/height from a PNG's IHDR chunk without decoding pixel data.
+ *
+ * A full `PNG.sync.read` inflates the whole image synchronously, which blocks
+ * the event loop for every in-flight route, just to learn two integers. The
+ * signature and IHDR chunk-type checks keep a truncated or non-PNG buffer from
+ * being recorded as a valid screenshot.
+ *
+ * @param {Buffer} buffer
+ * @returns {{ width: number, height: number }}
+ */
+export function readPngDimensions(buffer) {
+  if (
+    buffer.length < PNG_IHDR_END ||
+    !buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE) ||
+    buffer.toString('ascii', 12, 16) !== 'IHDR'
+  ) {
+    throw new Error('Screenshot is not a valid PNG (missing signature or IHDR chunk).');
+  }
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  // PNG spec (RFC 2083 §4.1.1): zero is invalid for either dimension.
+  if (width === 0 || height === 0) {
+    throw new Error(`Screenshot PNG header declares invalid dimensions ${width}x${height}.`);
+  }
+  return { width, height };
 }
 
 /** @typedef {import('../../manifest/types/index').VisualViewport} VisualViewport */
@@ -150,7 +179,7 @@ async function captureRoute(browser, route, baseUrl, screenshotsRoot) {
       path: absoluteImagePath,
       ...screenshotSettings
     });
-    const screenshot = PNG.sync.read(screenshotBuffer);
+    const { width, height } = readPngDimensions(screenshotBuffer);
 
     return {
       id: route.id,
@@ -159,15 +188,15 @@ async function captureRoute(browser, route, baseUrl, screenshotsRoot) {
       status: 'passed',
       durationMs: Date.now() - startedAt,
       imagePath,
-      width: screenshot.width,
-      height: screenshot.height,
+      width,
+      height,
       manifestEntry: {
         id: route.id,
         path: route.path,
         viewport: route.viewport,
         imagePath,
-        width: screenshot.width,
-        height: screenshot.height
+        width,
+        height
       }
     };
   } catch (error) {
@@ -289,6 +318,7 @@ export async function runBaselineCapture(options = {}) {
   };
 
   const browser = await chromium.launch(launchSettings);
+  const captureStartedAt = Date.now();
   let failures = 0;
 
   try {
@@ -357,6 +387,7 @@ export async function runBaselineCapture(options = {}) {
         failures += 1;
       }
     }
+    console.log(`[SnapDrift] Captured ${routes.length - failures}/${routes.length} route(s) in ${((Date.now() - captureStartedAt) / 1000).toFixed(1)}s.`);
   } finally {
     await browser.close();
     results.finishedAt = new Date().toISOString();
