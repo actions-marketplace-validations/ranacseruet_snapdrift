@@ -18,6 +18,10 @@
 
 - `@snapdrift/compare-core`: policy v2 aligned comparison metadata now identifies the row-alignment strategy (`alignmentStrategy: "exact" | "offset"`) and records the stable offset-run per-channel tolerance (`tolerance: 32`). Local-mismatch residual bands use a stricter `NOISE_DELTA` floor (2) and are not covered by `tolerance`. `mode` remains `"vertical-aligned"`; a coordinate fallback carries neither field. Additive metadata so consumers can tell byte-identical exact matches from tolerant stable-run matches and know residual bands are stricter. Closes #200.
 
+### Refactors
+
+- `@snapdrift/compare-core`: `compareBuffers`, `compareWithIgnoreRegions`, and `generateDiffImage` now delegate to one internal strict decoded-PNG pixel loop instead of keeping three copies of RGBA equality, ignore-mask handling, and diff painting. Public signatures, dimension-mismatch errors, result shapes, byte-equality and re-encode behavior, ignore gray, highlight color, and the hidden-RGB semantics are unchanged. Closes #203.
+
 ## 0.16.1 - 2026-10-27
 
 Workspace releases this version:
