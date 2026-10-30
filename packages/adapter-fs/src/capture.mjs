@@ -6,10 +6,11 @@ import os from 'node:os';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import pngjs from 'pngjs';
+import { readPngDimensions } from '@snapdrift/compare-core';
 
 import { loadSnapdriftConfig, readFirstDefinedEnv, SNAPDRIFT_CAPTURE_CONCURRENCY } from './config.mjs';
 import { createConcurrencyLimiter } from './concurrency.mjs';
+import { runSnapBatchCapture } from './snap-batch-capture.mjs';
 import {
   selectConfiguredRoutes,
   splitCommaList,
@@ -22,7 +23,6 @@ import {
   validateCaptureProfile
 } from '@snapdrift/manifest';
 
-const { PNG } = pngjs;
 const require = createRequire(import.meta.url);
 const engineVersion = require('../package.json').version;
 const playwrightVersion = require('playwright/package.json').version;
@@ -73,6 +73,25 @@ export function assertNavigationOk(response, route, targetUrl) {
       `refusing to capture an error page as a screenshot. Check the route path/baseUrl.`
     );
   }
+}
+
+/**
+ * Reads width/height from a screenshot's PNG header without decoding it.
+ *
+ * A full `PNG.sync.read` inflates the whole image synchronously, which blocks
+ * the event loop for every in-flight route, just to learn two integers. A
+ * buffer without a valid header is rejected so it is never recorded as a valid
+ * screenshot; pixel data is not validated.
+ *
+ * @param {Buffer} buffer
+ * @returns {{ width: number, height: number }}
+ */
+export function requirePngDimensions(buffer) {
+  const dimensions = readPngDimensions(buffer);
+  if (!dimensions) {
+    throw new Error('Screenshot is not a valid PNG (missing signature or IHDR chunk, or invalid dimensions).');
+  }
+  return dimensions;
 }
 
 /** @typedef {import('../../manifest/types/index').VisualViewport} VisualViewport */
@@ -149,7 +168,7 @@ async function captureRoute(browser, route, baseUrl, screenshotsRoot) {
       path: absoluteImagePath,
       ...screenshotSettings
     });
-    const screenshot = PNG.sync.read(screenshotBuffer);
+    const { width, height } = requirePngDimensions(screenshotBuffer);
 
     return {
       id: route.id,
@@ -158,15 +177,15 @@ async function captureRoute(browser, route, baseUrl, screenshotsRoot) {
       status: 'passed',
       durationMs: Date.now() - startedAt,
       imagePath,
-      width: screenshot.width,
-      height: screenshot.height,
+      width,
+      height,
       manifestEntry: {
         id: route.id,
         path: route.path,
         viewport: route.viewport,
         imagePath,
-        width: screenshot.width,
-        height: screenshot.height
+        width,
+        height
       }
     };
   } catch (error) {
@@ -239,10 +258,15 @@ async function captureViewportRoutes(browser, entries, baseUrl, screenshotsRoot,
  * @returns {Promise<{ resultsPath: string, manifestPath: string, screenshotsRoot: string, selectedRouteIds: string[] }>}
  */
 export async function runBaselineCapture(options = {}) {
+  const { config, configPath } = await loadSnapdriftConfig(options.configPath);
+  const captureEngine = process.env.SNAPDRIFT_CAPTURE_ENGINE || config.capture || 'playwright';
+  if (captureEngine === 'snap') {
+    return runSnapBatchCapture(options);
+  }
+
   const requestedRouteIds = [...(
     options.routeIds || splitCommaList(readFirstDefinedEnv(['SNAPDRIFT_ROUTE_IDS']))
   )];
-  const { config, configPath } = await loadSnapdriftConfig(options.configPath);
   const { routes, selectedRouteIds } = selectConfiguredRoutes(config, requestedRouteIds);
 
   // When outDir is provided (e.g. by the local CLI), store all outputs flat inside that directory
@@ -283,6 +307,7 @@ export async function runBaselineCapture(options = {}) {
   };
 
   const browser = await chromium.launch(launchSettings);
+  const captureStartedAt = Date.now();
   let failures = 0;
 
   try {
@@ -351,6 +376,7 @@ export async function runBaselineCapture(options = {}) {
         failures += 1;
       }
     }
+    console.log(`[SnapDrift] Captured ${routes.length - failures}/${routes.length} route(s) in ${((Date.now() - captureStartedAt) / 1000).toFixed(1)}s.`);
   } finally {
     await browser.close();
     results.finishedAt = new Date().toISOString();

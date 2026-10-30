@@ -1,4 +1,7 @@
-import { runBaselineCapture, assertNavigationOk } from '../src/capture.mjs';
+import pngjs from 'pngjs';
+import { runBaselineCapture, assertNavigationOk, requirePngDimensions } from '../src/capture.mjs';
+
+const { PNG } = pngjs;
 
 describe('@snapdrift/adapter-fs — capture', () => {
   test('runBaselineCapture is exported as a function', () => {
@@ -28,6 +31,26 @@ describe('@snapdrift/adapter-fs — capture', () => {
 
     test('passes when response is null (non-navigation scheme, e.g. about:blank)', () => {
       expect(() => assertNavigationOk(null, route, url)).not.toThrow();
+    });
+  });
+
+  describe('requirePngDimensions', () => {
+    test('returns width and height for a real PNG', () => {
+      expect(requirePngDimensions(PNG.sync.write(new PNG({ width: 7, height: 13 })))).toEqual({ width: 7, height: 13 });
+    });
+
+    // Header validation itself is covered in @snapdrift/compare-core; these
+    // pin that capture turns a rejected header into a thrown route failure.
+    test.each([
+      ['truncated', () => PNG.sync.write(new PNG({ width: 2, height: 2 })).subarray(0, 20)],
+      ['no signature', () => Buffer.alloc(64)],
+      ['zero width', () => {
+        const png = PNG.sync.write(new PNG({ width: 2, height: 2 }));
+        png.writeUInt32BE(0, 16);
+        return png;
+      }]
+    ])('throws for a %s buffer so the route fails and is retried', (_label, makeBuffer) => {
+      expect(() => requirePngDimensions(makeBuffer())).toThrow(/not a valid PNG/);
     });
   });
 });

@@ -51,6 +51,13 @@ export interface ComparisonRowMapping {
   kind: ComparisonRowKind;
   baselineStart?: number;
   currentStart?: number;
+  /**
+   * Present when an offset-run row was compared one pixel above or below the
+   * recorded current row. Output row i was compared to current row
+   * `currentStart + i + comparedOffset`. `currentStart` still consumes each
+   * current row once.
+   */
+  comparedOffset?: -1 | 0 | 1;
 }
 
 export interface ComparisonMetadata {
@@ -63,7 +70,25 @@ export interface ComparisonMetadata {
   policyVersion?: 2;
   /** Whether v2 aligned rows or fell back to coordinate comparison. */
   mode?: 'vertical-aligned' | 'coordinate-fallback';
-  /** Row mapping used to render and score an aligned result. */
+  /**
+   * Strategy that produced an aligned result. `exact` matched byte-identical
+   * rows with no tolerance; `offset` mapped piecewise vertical-offset runs and
+   * used a per-channel highlight tolerance for stable runs. Absent for
+   * coordinate fallback.
+   */
+  alignmentStrategy?: 'exact' | 'offset';
+  /**
+   * Maximum per-channel delta that stays matched on stable offset-run rows
+   * (`STRUCTURED_DELTA`, 32). Local-mismatch residual bands use `NOISE_DELTA`
+   * (2) instead, so this field does not describe those rows. Present only with
+   * `alignmentStrategy: 'offset'`.
+   */
+  tolerance?: number;
+  /**
+   * Row mapping used to render and score an aligned result.
+   * On an offset-run match, `matched` means mapped and below the highlight rule.
+   * `comparedOffset` names a one-pixel neighbor when that row was the one compared.
+   */
   rowMapping?: ComparisonRowMapping[];
   /** Why v2 used coordinate fallback, when it did. */
   fallbackReason?: ComparisonFallbackReason;
@@ -133,6 +158,7 @@ export class ComparisonTooLargeError extends Error {
 export const MAX_COMPARISON_PIXELS: number;
 export const MAX_ALIGNMENT_ROWS: number;
 export const MAX_ALIGNMENT_EDIT_LENGTH: number;
+export const MIN_STRUCTURAL_ROW_REPEATS: number;
 
 export function compareBuffers(baselineBuffer: Buffer, currentBuffer: Buffer): CompareBuffersResult;
 /** Metrics-only overload: `diffImageBuffer` is not rendered. */
@@ -153,3 +179,16 @@ export function compareWithIgnoreRegions(baselineBuffer: Buffer, currentBuffer: 
  * `addedColor`/`removedColor` do not apply because equal dimensions preclude one-sided pixels.
  */
 export function generateDiffImage(baselineBuffer: Buffer, currentBuffer: Buffer, options?: DiffImageOptions): Buffer;
+
+export interface PngDimensions {
+  width: number;
+  height: number;
+}
+
+/**
+ * Reads width/height from a PNG's IHDR chunk without decoding pixel data.
+ * Returns `undefined` when the buffer is too short, lacks the PNG signature,
+ * does not start with an IHDR chunk, or declares a zero or out-of-range
+ * dimension. Pixel data is not validated.
+ */
+export function readPngDimensions(buffer: Buffer): PngDimensions | undefined;

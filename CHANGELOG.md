@@ -2,6 +2,119 @@
 
 ## Unreleased
 
+## 0.17.0 - 2026-10-28
+
+Workspace releases this version:
+
+- `@snapdrift/compare-core` 1.8.0 — policy v2 offset-run alignment suppresses mobile rendering noise: structural padding is skipped, compensating duplicate bands are recognized, unresolved shift-boundary bands split into ink plus padding, localized glyph/badge displacement requires background and foreground evidence, a stable row keeps its own offset unless its own cost exceeds `LOCAL_MISMATCH_COST`, and the offset scoring budget admits a 1170×17187 pair. Ambiguous exact alignment tries the offset mapping before coordinate fallback.
+- `@snapdrift/adapter-fs` 1.7.2 — now depends on `@snapdrift/compare-core ^1.8.0` for the released comparison engine.
+
+`@snapdrift/manifest` stays 1.8.0 and `@snapdrift/adapter-report-md` stays 1.4.0. Root floors move to `@snapdrift/compare-core ^1.8.0` and `@snapdrift/adapter-fs ^1.7.2`; the previous `adapter-fs` 1.7.1 and `compare-core` 1.7.0 do not satisfy them, so installing `snapdrift` 0.17.0 always gets the released engine. The dispatcher pins `2d93a54`, the #212 merge commit on `main`, which includes the newest commit touching `actions/` (`1cbf629`, the shell-only Playwright install).
+
+### Fixes
+
+- `@snapdrift/compare-core`: policy v2 (`alignment: 'vertical'`) no longer falls back to coordinate comparison with `fallbackReason: 'ambiguous'` just because a page grew by rows that match repeated card padding or background rows elsewhere in the image. An unmatched row now counts as ambiguous only when it occurs fewer than `MIN_STRUCTURAL_ROW_REPEATS` (16, newly exported) times on either side. On a real 1440x3386 page screenshot pair where one card grew by 22 rows, this took the reported drift from 10.83% in coordinate fallback to 1.43% aligned.
+- `@snapdrift/compare-core`: offset-run content intervals now report a row-weighted `meanCost` when adjacent ±1 runs merge, instead of averaging the two run means. This is diagnostic output only; row plans and metrics are unchanged.
+- `@snapdrift/compare-core`: the exact row alignment no longer wraps the Myers search in a bare `catch`. An exhausted edit budget still falls back as `alignment-limit`; an unexpected error now surfaces instead of being reported as that fallback.
+- `@snapdrift/compare-core`: policy v2 no longer throws `comparison_too_large` when the exact Myers row alignment produces an output canvas above `maxPixels`. The exact and offset-run alignment paths now agree: an over-budget aligned canvas falls back to coordinate comparison with `fallbackReason: 'alignment-limit'`, so a pair v1 compares on a fitting union canvas completes under v2 (repro: baseline `[A,X,B,C]` vs current `[A,B,C,Y]` at width 1 and `maxPixels` 4). The coordinate union guard still throws `comparison_too_large`. Closes #199.
+- `@snapdrift/compare-core`: policy v2 vertical alignment no longer paints mobile rendering noise as content. Offset-run plans skip structural padding (a one-sided row needs `CONTENT_INK_MIN`, 16, full-width ink pixels), treat a one-sided content row that duplicates a claimed row within `STRUCTURAL_DUPLICATE_COST` 0.05 at an offset within `STRUCTURAL_DUPLICATE_WINDOW` (3) of the neighboring stable runs as a compensating band, and split an unresolved shift-boundary band into changed-ink rows plus padding instead of deleting or painting the whole band. Inside a paired row, fewer than 16 mismatched pixels are a localized glyph or badge displacement only when every mismatch carries both background evidence (the old baseline pixel exists in a claimed current row) and foreground evidence (the new current pixel exists in a claimed baseline row) at one common non-zero offset within ±3; inserted current rows and deleted baseline rows count as claimed rows on their respective sides. A mismatch with only one side's duplicate, such as a new small mark on uniform background, stays orange as content. A displaced run bordering unexplained mismatched content or content-carrying one-sided rows stays painted as part of that edit. A stable row refines to a ±1 neighbor only when its own recorded-offset cost exceeds `LOCAL_MISMATCH_COST` 0.5; a smaller-residual row keeps its own offset so its nominal current row is compared instead of being consumed without comparison. On the mobile capture pair in Snap visual run `run_6c287da7aef84a94bd663c01` (1170×17187 baseline vs 1170×17268 current), this took the reported mobile diff from `0.18773458736975068` (3,792,907 / 20,203,560 px) in coordinate fallback to `0.0036852305076227753` (74,942 / 20,335,770 px) with `alignmentStrategy: "offset"`. The 74,942 px are the real paragraph reflow (58,557 orange changed + 16,380 green inserted); five residual rendering-noise pixels at output rows 8720..8734 remain, whose mismatches find no claimed duplicate. The desktop diff stayed `0.0019953484937979917` (9,729 / 4,875,840 px), so both routes now sit below the configured 1% threshold.
+- `@snapdrift/compare-core`: an exact-alignment `ambiguous` result now tries the offset-run mapping before falling back to v1 coordinate comparison, so a page that grew by rows matching repeated card padding can align instead of taking a whole-page coordinate diff. Three offset-run boundary cases are fixed: the Viterbi incumbent is free only when its own row cost is zero (a row matching several offsets with ink residue still votes to leave), an unresolved row keeps its best in-window offset as evidence and only a ±1 neighbor refines to the full window when the row's own cost exceeds `LOCAL_MISMATCH_COST` 0.5, and a pair or evidence offset is accepted only within `STRUCTURAL_DUPLICATE_WINDOW` (3) of the neighboring stable runs; a final run overflowing the current height trims to a deletion instead of abandoning the mapping. The offset scoring budget rises to `MAX_OFFSET_SCORE_VISITS` 2.5e9 so a 1170×17187 pair (~2.02e9 visits) scores instead of falling back; the 1440×3386 desktop pair stays ~0.49e9.
+
+### Performance
+
+- `@snapdrift/compare-core`: policy v2 metrics-only comparisons (`renderDiffImage: false`) skip the per-pixel loop for byte-identical matched row runs and count them straight into the denominator.
+- `@snapdrift/compare-core`: offset-run analysis caches the pass-1 full-width `hotRuns` scan for each stable row and reuses it when summarizing content intervals, instead of scanning every stable row a second time. A row whose offset changes after gap bridging or sliver absorption is scanned once at its final offset. Interval `highlightRows`/`structuredRows`/`meanCost`, row plans, and metrics are unchanged. Measured on the insertion-shift fixture (1440×5622 baseline, 1440×5644 current) in plain Node, best of 3 alternating runs: `analyzeOffsetRuns` 2518.1 ms -> 2500.3 ms (-0.7%); `compareImages(renderDiffImage: false)` 2924.3 ms -> 2862.7 ms (-2.1%).
+- `@snapdrift/compare-core`: exact row alignment now fingerprints rows with two independent 32-bit FNV-style accumulators over `Uint32Array` word views (byte hashing when the view cannot be built) packed into one combined 53-bit JS safe integer (`high * 2^32 + low`) instead of Node SHA-1 hex digests. A plain 32-bit value over ~16k rows has a few-percent birthday collision chance (~1.6% at 16,384 rows over 2^32); the packed 53-bit value shrinks that to roughly 7.5e-9, and `rowsEqual` still byte-verifies every Myers match, so a collision still falls back as `verification-failed`. No BigInt is used. Best of 3 in plain Node outside Jest: the insertion-shift fixture (1440x5622) fingerprint-only 58.4ms -> 53.2ms (-8.9%) and alignRows 168.2ms -> 150.9ms (-10.3%); a tall synthetic 1440x8000 pair with one inserted row fingerprint-only 64.6ms -> 51.8ms (-19.8%), alignRows 64.7ms -> 51.9ms (-19.7%), and full metrics-only `compareImages` 402.9ms -> 386.3ms (-4.1%). Row mappings and metrics are identical before and after; the fixture's full comparison is dominated by the unchanged offset-run path, so its metrics-only time stayed ~2890ms.
+
+### Features
+
+- `@snapdrift/compare-core`: policy v2 aligned comparison metadata now identifies the row-alignment strategy (`alignmentStrategy: "exact" | "offset"`) and records the stable offset-run per-channel tolerance (`tolerance: 32`). Local-mismatch residual bands use a stricter `NOISE_DELTA` floor (2) and are not covered by `tolerance`. `mode` remains `"vertical-aligned"`; a coordinate fallback carries neither field. Additive metadata so consumers can tell byte-identical exact matches from tolerant stable-run matches and know residual bands are stricter. Closes #200.
+
+### Refactors
+
+- `@snapdrift/compare-core`: `compareBuffers`, `compareWithIgnoreRegions`, and `generateDiffImage` now delegate to one internal strict decoded-PNG pixel loop instead of keeping three copies of RGBA equality, ignore-mask handling, and diff painting. Public signatures, dimension-mismatch errors, result shapes, byte-equality and re-encode behavior, ignore gray, highlight color, and the hidden-RGB semantics are unchanged. Closes #203.
+- `@snapdrift/compare-core`: `offset-align` exports `rowInkCost`, `rowHasAnyInk`, and `rowHasContentInk` plus the new `CONTENT_INK_MIN`, `STRUCTURAL_DUPLICATE_COST`, and `STRUCTURAL_DUPLICATE_WINDOW` constants so the render plan and painter share one ink and duplicate definition. These are module-level exports; the package index is unchanged.
+
+## 0.16.1 - 2026-10-27
+
+Workspace releases this version:
+
+- `@snapdrift/compare-core` 1.7.0 — new public `readPngDimensions` export (PNG IHDR width/height without decoding pixels).
+- `@snapdrift/adapter-fs` 1.7.1 — local capture reads screenshot dimensions from the PNG header instead of fully decoding every PNG, and now depends on `@snapdrift/compare-core ^1.7.0` for that reader.
+
+`@snapdrift/manifest` stays 1.8.0 and `@snapdrift/adapter-report-md` stays 1.4.0. Root floors move to `@snapdrift/compare-core ^1.7.0` and `@snapdrift/adapter-fs ^1.7.1`; the previous `adapter-fs` 1.7.0 and `compare-core` 1.6.0 do not satisfy them, so installing `snapdrift` 0.16.1 always gets the shared reader. The dispatcher pins `1cbf629`, the #195 merge commit on `main`, which is the newest commit touching `actions/` and includes the shell-only Playwright install.
+
+### Performance
+
+- Hybrid (`provider: "snap"` with a local `baseUrl`) capture uploads screenshots to Snap with up to 4 routes in flight instead of one at a time, and stops starting new uploads after the first failure.
+- The latest-baseline lookup for hybrid diff runs now starts before local capture and overlaps with it.
+- Local Playwright capture reads screenshot width/height from the PNG header instead of fully decoding every PNG, which no longer blocks the event loop for all in-flight routes. A corrupt PNG body is no longer detected at capture time; a buffer without a valid PNG signature or IHDR chunk still fails the route.
+- GitHub Actions install only Playwright's Chromium headless shell (`playwright install --with-deps --only-shell chromium`) instead of full Chromium plus the shell. Capture already launches with `headless: true`, which uses the shell, so rendering is unchanged. Measured on `node:22-bookworm` with Playwright 1.63.0: install 22s -> 15s, browser cache 662 MB -> 269 MB, identical browser version and screenshot bytes.
+- Capture and upload phases log their duration (`Captured N route(s) in Xs`, `Uploaded N screenshot(s) to Snap in Xs`).
+
+### Features
+
+- `@snapdrift/compare-core` exports `readPngDimensions(buffer)`, which reads width/height from a PNG's IHDR chunk without decoding pixels and returns `undefined` for a buffer that is too short, lacks the PNG signature, does not start with IHDR, or declares a zero or above-2^31-1 dimension.
+
+### Refactors
+
+- Local capture (`@snapdrift/adapter-fs`) and the Snap baseline export (`lib/snap-provider.mjs`) now use the shared `readPngDimensions` instead of their own copies. The Snap baseline export is slightly stricter than before: an exported image whose header is not a valid IHDR (or declares a zero dimension) falls back to the viewport descriptor's dimensions instead of being recorded with the header's values. Requires the `@snapdrift/compare-core` release that adds the export; dependency floors are raised at release time. Closes #194.
+
+## 0.16.0 - 2026-10-05
+
+Workspace releases this version:
+
+- `@snapdrift/manifest` 1.8.0 — capture engine configuration (`capture: "playwright" | "snap"`) under `provider: "local"`, export `isLocalBaseUrl`, and recognize `snap-batch` capture profile engine.
+- `@snapdrift/adapter-fs` 1.7.0 — Snap Cloud batch screenshot capture engine (`runSnapBatchCapture`) using POST `/v1/screenshots`, capture engine delegation in `runBaselineCapture`, and `isLocalBaseUrl` re-export.
+
+`@snapdrift/compare-core` stays 1.6.0 and `@snapdrift/adapter-report-md` stays 1.4.0. Root floors move to `@snapdrift/manifest ^1.8.0` and `@snapdrift/adapter-fs ^1.7.0`. The dispatcher pins `8e82795`, the #191 merge commit on `main`, which includes skipping Playwright installation in composite actions when `capture: "snap"` with a remote `baseUrl`.
+
+### Features
+
+- Added Snap Cloud batch screenshot capture engine (`capture: "snap"`) under `provider: "local"`. Dispatches route screenshots concurrently to Snap Cloud's batch screenshot API (`POST /v1/screenshots`), saving significant CI run time by offloading browser execution.
+- Added automatic Playwright setup skipping in composite actions (`actions/baseline` and `actions/pr-diff`) when `capture: "snap"` is configured with a remote `baseUrl`, avoiding unnecessary browser binary downloads.
+- Supported `SNAPDRIFT_CAPTURE_ENGINE` environment variable (`playwright` | `snap`) to override the configured capture engine at runtime.
+- Added actionable validation rejecting loopback and local `baseUrl` (`localhost`, `127.0.0.1`, `::1`) when `capture: "snap"` is used, directing users to use `playwright` or tunnel services.
+- Added capture profile engine validation in `@snapdrift/manifest` to recognize `snap-batch` and prevent comparing local Playwright captures against Snap Cloud batch captures.
+- Added resilient batch capture polling with retries on transient errors (HTTP 429, 5xx on GET status polls, network errors) while safely avoiding POST retries on 5xx to prevent duplicate jobs.
+
+## 0.15.0 - 2026-09-22
+
+Workspace releases this version:
+
+- `@snapdrift/compare-core` 1.6.0 — vertical-offset alignment when exact row
+  matching hits its edit cap, including alpha-aware highlighting and the
+  search memory caps.
+- `@snapdrift/manifest` 1.7.0 — `comparedOffset` on comparison row mappings.
+- `@snapdrift/adapter-fs` 1.6.0 — depends on that compare-core so local policy
+  v2 comparisons use the offset-run engine.
+
+`@snapdrift/adapter-report-md` stays 1.4.0. Root floors move to
+`@snapdrift/compare-core ^1.6.0`, `@snapdrift/manifest ^1.7.0`, and
+`@snapdrift/adapter-fs ^1.6.0`. The dispatcher pins `7b7b913`, the #179 merge
+commit on `main`, which contains the offset-run runtime loaded by both wrapper
+actions.
+
+### Features
+
+- Comparison policy v2, after exact row alignment hits its edit cap, maps long
+  vertical-offset runs so an insertion does not highlight the rest of a shifted
+  page. A matched row on that path was mapped and fell below the highlight
+  rule; it does not have to be byte-identical. When the compared row is one
+  pixel above or below the recorded current row, the mapping includes
+  `comparedOffset` (`-1` or `1`).
+- Offset highlighting includes alpha. Scoring ignores fully transparent pixels
+  and treats a large opacity change as a structured mismatch, so a small alpha
+  delta stays on the offset path.
+- The offset search rejects a page before allocating its score matrices when
+  those matrices would exceed 64 MB. It also samples every 32nd row first and
+  stops that sample once the page cannot be a correspondence, so a dissimilar
+  page falls back without scoring every offset. A dissimilar 1440×5622 pair
+  fell back in about 0.9s; scoring every offset on that pair took about 3.5s.
+- An offset canvas that would exceed `maxPixels` falls back to coordinate
+  comparison instead of throwing. The coordinate union can still throw when it
+  itself exceeds the limit.
+
 ## 0.14.0 - 2026-09-21
 
 Workspace releases this version:

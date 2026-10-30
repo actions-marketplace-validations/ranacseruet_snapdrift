@@ -46,7 +46,7 @@ SnapDrift owns route selection, capture, comparison, skipped-report generation, 
 
 ```yaml
 - name: SnapDrift Baseline
-  uses: ranacseruet/snapdrift@v0.14.0
+  uses: ranacseruet/snapdrift@v0.17.0
   with:
     mode: baseline
     repo-config-path: .github/snapdrift.json
@@ -71,7 +71,7 @@ Then add SnapDrift after the app is running:
 
 ```yaml
 - name: SnapDrift Report
-  uses: ranacseruet/snapdrift@v0.14.0
+  uses: ranacseruet/snapdrift@v0.17.0
   with:
     mode: pr-diff
     github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -86,8 +86,8 @@ The wrappers remain published in their own right, and are equivalent to the disp
 
 | Entry point | Equivalent to |
 |-------------|---------------|
-| `ranacseruet/snapdrift@v0.14.0` with `mode: baseline` | `ranacseruet/snapdrift/actions/baseline@v0.14.0` |
-| `ranacseruet/snapdrift@v0.14.0` with `mode: pr-diff` | `ranacseruet/snapdrift/actions/pr-diff@v0.14.0` |
+| `ranacseruet/snapdrift@v0.17.0` with `mode: baseline` | `ranacseruet/snapdrift/actions/baseline@v0.17.0` |
+| `ranacseruet/snapdrift@v0.17.0` with `mode: pr-diff` | `ranacseruet/snapdrift/actions/pr-diff@v0.17.0` |
 
 Use the wrappers directly when you want to skip the dispatcher's input indirection, and the lower-level `capture`, `compare`, `scope`, `resolve-baseline`, `stage`, `comment`, and `enforce` actions when you need to orchestrate the stages yourself.
 
@@ -130,7 +130,7 @@ jobs:
           done
 
       - name: SnapDrift Report
-        uses: ranacseruet/snapdrift@v0.14.0
+        uses: ranacseruet/snapdrift@v0.17.0
         with:
           mode: pr-diff
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -170,7 +170,7 @@ jobs:
           done
 
       - name: SnapDrift Report
-        uses: ranacseruet/snapdrift@v0.14.0
+        uses: ranacseruet/snapdrift@v0.17.0
         with:
           mode: pr-diff
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -270,6 +270,32 @@ If you're adopting SnapDrift as a replacement for the upstream `snap/github-acti
 snapdrift init --from-snap-action .github/workflows/snap.yml
 ```
 
+## Fast CI with Snap Cloud Batch Screenshots (`capture: "snap"`)
+
+When your application deploys preview URLs (e.g., Vercel, Netlify, Cloudflare Pages, AWS Amplify) or runs on a publicly accessible staging server during CI, you can offload screenshot rendering to Snap Cloud while keeping comparison and artifact management local (`provider: "local"`):
+
+```json
+{
+  "baseUrl": "https://preview-pr-123.example.com",
+  "capture": "snap",
+  "snap": {
+    "apiKeyEnv": "SNAP_API_KEY"
+  },
+  "routes": [
+    { "id": "home-desktop", "path": "/", "viewport": "desktop" },
+    { "id": "pricing-desktop", "path": "/pricing", "viewport": "desktop" }
+  ]
+}
+```
+
+### Why use `capture: "snap"`?
+- **Skips Playwright Installation in CI:** The GitHub Actions wrapper actions (`actions/baseline` and `actions/pr-diff`) detect `capture: "snap"` with a remote `baseUrl` and skip `playwright install --with-deps --only-shell chromium`, saving 45–90 seconds per workflow run.
+- **Parallel Cloud Rendering:** Snap Cloud renders full-page screenshots concurrently via its batch API (`POST /v1/screenshots`).
+- **Local Diff Engine:** Screenshots are downloaded and diffed locally on the runner with `@snapdrift/compare-core`, keeping full artifact bundles and PR comments in GitHub Actions without requiring hosted project configuration.
+
+> [!NOTE]
+> `capture: "snap"` requires a public or preview URL reachable by Snap Cloud. If `baseUrl` points to `localhost` or `127.0.0.1`, SnapDrift will fail with a clear configuration error because Snap Cloud cannot access loopback addresses. For local development or local dev servers, use `capture: "playwright"` (the default).
+
 ## Low-level actions
 
 The `pr-diff` wrapper composes the following low-level steps. They're still available for custom orchestration but most consumers don't need to reach for them:
@@ -345,11 +371,12 @@ The Snap client never retries 4xx and never falls back, even when `onUnavailable
 **Screenshots have different dimensions**  
 SnapDrift compares the top-left-aligned union canvas by default. Policy v2 can
 align equal-width rows so unchanged content after an insertion is not painted
-as drift; width changes, ignored regions, ambiguous rows, and resource limits
-fall back to coordinate comparison. Either policy records the route in
-`changed[]`, and local runs write a diff PNG. Refresh the baseline after an
-intentional change when you want future runs to return to equal-size
-comparisons.
+as drift; width changes, ignored regions, ambiguous rows (an inserted or
+deleted row that also appears elsewhere but is not a repeated padding or
+background row), and resource limits fall back to coordinate comparison.
+Either policy records the route in `changed[]`, and local runs write a diff
+PNG. Refresh the baseline after an intentional change when you want future
+runs to return to equal-size comparisons.
 
 **A route appears in `errors[]`**  
 Capture failed before comparison. Confirm the app is fully ready and reachable before SnapDrift runs.

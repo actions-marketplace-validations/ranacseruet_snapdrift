@@ -58,6 +58,20 @@ export interface ComparisonMetadata {
   totalPixels: number;
   policyVersion?: 2;
   mode?: 'vertical-aligned' | 'coordinate-fallback';
+  /**
+   * Strategy that produced an aligned result. `exact` matched byte-identical
+   * rows with no tolerance; `offset` mapped piecewise vertical-offset runs and
+   * used a per-channel highlight tolerance for stable runs. Absent for
+   * coordinate fallback.
+   */
+  alignmentStrategy?: 'exact' | 'offset';
+  /**
+   * Maximum per-channel delta that stays matched on stable offset-run rows
+   * (`STRUCTURED_DELTA`, 32). Local-mismatch residual bands use `NOISE_DELTA`
+   * (2) instead, so this field does not describe those rows. Present only with
+   * `alignmentStrategy: 'offset'`.
+   */
+  tolerance?: number;
   rowMapping?: ComparisonRowMapping[];
   fallbackReason?: ComparisonFallbackReason;
 }
@@ -72,6 +86,12 @@ export interface ComparisonRowMapping {
   kind: ComparisonRowKind;
   baselineStart?: number;
   currentStart?: number;
+  /**
+   * Present when an offset-run row was compared one pixel above or below the
+   * recorded current row. Output row i was compared to current row
+   * `currentStart + i + comparedOffset`.
+   */
+  comparedOffset?: -1 | 0 | 1;
 }
 
 export interface SnapConfig {
@@ -118,6 +138,7 @@ export interface VisualRegressionConfig {
   };
   selection?: VisualRegressionSelectionConfig;
   provider?: 'local' | 'snap';
+  capture?: 'playwright' | 'snap';
   snap?: SnapConfig;
 }
 
@@ -161,6 +182,7 @@ export interface VisualBaselineResults {
   screenshotsRoot?: string;
   routes: VisualBaselineRouteResult[];
   passed?: boolean;
+  engine?: string;
 }
 
 /**
@@ -421,11 +443,13 @@ export const COMPARISON_POLICY_VERSION: 1;
 export const LATEST_COMPARISON_POLICY_VERSION: 2;
 export const SUPPORTED_COMPARISON_POLICY_VERSIONS: readonly [1, 2];
 export const VALID_PROVIDER_VALUES: readonly ['local', 'snap'];
+export const VALID_CAPTURE_ENGINES: readonly ['playwright', 'snap'];
 export const VALID_ON_UNAVAILABLE_MODES: readonly ['fail', 'warn-and-skip', 'fallback-local'];
 export const SNAPDRIFT_NAVIGATION_TIMEOUT_MS: number;
 export const SNAPDRIFT_SETTLE_DELAY_MS: number;
 
 export function splitCommaList(value: string | undefined): string[];
+export function isLocalBaseUrl(baseUrl: string | undefined): boolean;
 export function validateSnapdriftConfig(value: unknown, sourceLabel?: string): VisualRegressionConfig;
 export function resolveFromWorkingDirectory(config: VisualRegressionConfig, relativePath: string): string;
 export function selectConfiguredRoutes(

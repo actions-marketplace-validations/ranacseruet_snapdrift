@@ -84,7 +84,7 @@ describe('SnapDrift action contracts', () => {
         expect(candidate.run).toContain('GITHUB_SHA');
         expect(candidate.run).toContain('current=true');
         expect(publish.if).toBe("steps.baseline_candidate.outputs.current == 'true'");
-        expect(publish.uses).toBe('ranacseruet/snapdrift@v0.14.0');
+        expect(publish.uses).toBe('ranacseruet/snapdrift@v0.17.0');
         expect(publish.with).not.toHaveProperty('route-ids');
     });
 
@@ -183,6 +183,40 @@ describe('SnapDrift action contracts', () => {
         expect(prDiffConfig.run).toContain('isLocalBaseUrl(config.baseUrl)');
         expect(prDiffConfig.run).toContain('snap_local_capture=');
         expect(prDiffInstall.if).toContain("steps.config.outputs.snap_local_capture == 'true'");
+    });
+
+    it('installs only the Chromium headless shell, which is what the headless capture launch uses', async () => {
+        // `headless: true` launches chromium-headless-shell, so the full Chromium
+        // download is dead weight. If capture ever launches headed or via a
+        // channel, the shell-only install would break it and this must change.
+        for (const actionPath of ['actions/capture/action.yml', 'actions/baseline/action.yml', 'actions/pr-diff/action.yml']) {
+            const action = await readAction(actionPath);
+            const install = action.runs.steps.find((step) => step.name === 'Install Playwright Chromium');
+            expect(install.run).toContain('install --with-deps --only-shell chromium');
+        }
+        const captureSource = await fs.readFile('packages/adapter-fs/src/capture.mjs', 'utf8');
+        expect(captureSource).toMatch(/launchSettings\s*=\s*\{[^}]*\bheadless:\s*true\b/);
+        expect(captureSource).not.toMatch(/channel\s*:/);
+    });
+
+    it('skips Playwright install when capture: "snap" with remote baseUrl', async () => {
+        const baseline = await readAction('actions/baseline/action.yml');
+        const prDiff = await readAction('actions/pr-diff/action.yml');
+
+        const baselineConfig = baseline.runs.steps.find((step) => step.id === 'config');
+        const baselineInstall = baseline.runs.steps.find((step) => step.name === 'Install Playwright Chromium');
+        const prDiffConfig = prDiff.runs.steps.find((step) => step.id === 'config');
+        const prDiffInstall = prDiff.runs.steps.find((step) => step.name === 'Install Playwright Chromium');
+
+        expect(baselineConfig.run).toContain('capture_engine=');
+        expect(baselineConfig.run).toContain('is_local_base_url=');
+        expect(baselineInstall.if).toContain("steps.config.outputs.capture_engine != 'snap'");
+        expect(baselineInstall.if).toContain("steps.config.outputs.is_local_base_url == 'true'");
+
+        expect(prDiffConfig.run).toContain('capture_engine=');
+        expect(prDiffConfig.run).toContain('is_local_base_url=');
+        expect(prDiffInstall.if).toContain("steps.config.outputs.capture_engine != 'snap'");
+        expect(prDiffInstall.if).toContain("steps.config.outputs.is_local_base_url == 'true'");
     });
 
     it('resolve-baseline honors an absolute download-path instead of always prefixing the workspace', async () => {

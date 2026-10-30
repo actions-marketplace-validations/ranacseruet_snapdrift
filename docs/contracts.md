@@ -32,6 +32,7 @@ SnapDrift reads runtime behavior from `.github/snapdrift.json` by default.
 
 | Field | Type | Description |
 |:------|:-----|:------------|
+| `capture` | `string` | Capture engine for `provider: "local"`: `"playwright"` (default) or `"snap"` (Snap Cloud batch screenshot API) |
 | `selection.sharedPrefixes` | `string[]` | Prefixes that force the full route set |
 | `selection.sharedExact` | `string[]` | Exact files that force the full route set |
 | `provider` | `string` | `"local"` (default) or `"snap"` for hosted backend |
@@ -41,6 +42,8 @@ SnapDrift reads runtime behavior from `.github/snapdrift.json` by default.
 | `snap.projectId` | `string` | Snap project ID or `"auto"` (default: `"auto"`, derives from `GITHUB_REPOSITORY`) |
 | `snap.onUnavailable` | `string` | Behavior when Snap is unreachable: `"fail"` (default), `"warn-and-skip"`, or `"fallback-local"` |
 | `diff.comparisonPolicy` | `{ "version": 1 \| 2, "threshold": number }` | Optional explicit comparison policy. Deprecated v1 remains the compatibility default; new configurations should use v2 for bounded vertical row alignment. `threshold` must match `diff.threshold` |
+
+When `capture: "snap"` is set (or overridden via `SNAPDRIFT_CAPTURE_ENGINE=snap`), SnapDrift routes baseline and diff captures to Snap Cloud's batch screenshot API (`POST /v1/screenshots`) instead of launching local Chromium via Playwright. Rendered PNGs are downloaded in parallel and diffed locally via `@snapdrift/compare-core`. This requires a public or preview `baseUrl` (loopback and private network URLs like `localhost`, `127.0.0.1`, `::1` are rejected) and an API key (configured in `snap.apiKeyEnv` / `snap.apiKey` or via `SNAP_API_KEY`). When `capture: "snap"` is used with a remote `baseUrl`, GitHub Actions wrapper actions (`actions/baseline`, `actions/pr-diff`) skip the `playwright install --with-deps --only-shell chromium` step, accelerating CI workflows.
 
 When `provider: "snap"` is set, the `snap` block is required. Exactly one of `snap.apiKeyEnv` or `snap.apiKey` must be present. `snap.apiKey` accepts `${VAR}` interpolation (for example `"${SNAP_API_KEY}"`); the referenced environment variable must be set at runtime or the config loader throws.
 
@@ -290,13 +293,24 @@ objects, `dimensionsChanged`, and the effective `totalPixels` denominator. A
 local changed item with a generated image contains `diffImagePath`, relative to
 the diff output bundle (for example `diffs/home.png`).
 
-Policy v2 comparison metadata additionally includes `policyVersion: 2` and
-`mode`. An aligned result has `mode: "vertical-aligned"` and a compact
-`rowMapping` describing matched, changed, inserted, and deleted row runs. A
+Policy v2 comparison metadata additionally includes `policyVersion: 2`,
+`mode`, and, for aligned results, `alignmentStrategy`. An aligned result has
+`mode: "vertical-aligned"` and a compact `rowMapping` describing matched,
+changed, inserted, and deleted row runs. `alignmentStrategy: "exact"` records
+the Myers fingerprint path: matched rows are byte-identical and `tolerance` is
+absent. `alignmentStrategy: "offset"` records the piecewise vertical-offset
+fallback: `tolerance` is the maximum per-channel delta that stays unhighlighted
+on stable offset-run rows (`STRUCTURED_DELTA`, 32). Local-mismatch residual
+bands between stable runs instead highlight deltas above `NOISE_DELTA` (2), so
+`tolerance` does not cover those rows. A matched stable offset-run row was
+mapped and fell below the 32 rule, so its rows need not be byte-identical. A segment may include `comparedOffset` of `-1` or
+`1` when the compared current row is one pixel away from `currentStart`; output
+row `i` was compared to current row `currentStart + i + comparedOffset`. A
 `mode: "coordinate-fallback"` result includes `fallbackReason` when widths,
 ignore regions, ambiguity, or the alignment resource limit prevent safe row
-alignment. The aligned canvas may be taller than either source image because
-inserted and deleted rows each occupy an output row.
+alignment, and carries neither `alignmentStrategy` nor `tolerance`. The aligned
+canvas may be taller than either source image because inserted and deleted rows
+each occupy an output row.
 
 When a changed item has a generated local `diffImagePath`, its PR comment cell
 links to the uploaded report artifact (or the workflow run when no artifact URL
@@ -332,7 +346,7 @@ Additional missing-baseline fields: `baselineAvailable`, `currentResultsPath`.
 - `diff.threshold` applies per screenshot
 - Missing captures are counted separately from drift signals
 - Comparison policy v1 `{ "version": 1, "threshold": number }` is deprecated but remains the compatibility default. Images are top-left aligned on a max-dimension union canvas with no scaling. Overlap pixels are compared, one-sided pixels count as changed (including transparent pixels), and empty union corners do not enter the denominator.
-- Comparison policy v2 `{ "version": 2, "threshold": number }` is opt-in. When source widths match and no ignore regions are requested, rows are fingerprinted and aligned with a bounded Myers sequence diff. Unchanged content that moves after an insertion/deletion remains matched; inserted current rows are green, deleted baseline rows are red, and actual pixel edits are orange. Width changes, ignore regions, ambiguous row matches, and resource limits fall back to v1 coordinate comparison and record the fallback reason. This is a raster row alignment aid, not DOM or arbitrary component matching.
+- Comparison policy v2 `{ "version": 2, "threshold": number }` is opt-in. When source widths match and no ignore regions are requested, rows are fingerprinted and aligned with a bounded Myers sequence diff. If that search hits its edit cap, long vertical-offset runs are mapped instead. Inside a run, a row is compared one pixel above or below the recorded current row only when the row's own recorded-offset ink cost exceeds `LOCAL_MISMATCH_COST` (0.5) and a ±1 neighbor matches; a stable row with a smaller residual keeps its own offset, so its nominal current row is still compared instead of being consumed without comparison. `currentStart` still consumes each current row once, so that neighbor is not a separate insertion or deletion. When the compared row differs, the segment includes `comparedOffset` of `-1` or `1`: output row `i` was compared to current row `currentStart + i + comparedOffset`. On stable offset-run rows, a pixel whose red, green, blue, or alpha channel differs by 32 or less stays unhighlighted, so rendering noise and soft edges remain matched. A local-mismatch residual band between stable runs is stricter: a pixel there is highlighted when any channel differs by more than `NOISE_DELTA` (2). A short cluster of such larger channel deltas is an orange edit. A wide band of those pixels is a local mismatch: it is highlighted in place and does not discard the rest of the page. Unmatched baseline rows are red deletions. Current rows with no baseline partner are green insertions. `matched` on this path means the row was mapped and fell below this highlight rule. Exact fingerprint matches remain byte-identical. Aligned metadata records which strategy applied: exact Myers results carry `alignmentStrategy: "exact"` and no `tolerance`; offset-run results carry `alignmentStrategy: "offset"` and the stable-run `tolerance: 32`, while residual local-mismatch bands are not covered by `tolerance`. An unmatched row that also occurs on the opposite side is ambiguous only when its repeat count on either side stays below `MIN_STRUCTURAL_ROW_REPEATS` (16): such a row could be moved content. Ambiguous exact alignment first tries the offset-run mapping; when that mapping succeeds, the result is `vertical-aligned` with `alignmentStrategy: "offset"`, and only an unsuccessful mapping falls back to v1 coordinate comparison as `ambiguous`. A row that repeats at least 16 times on either side (page background, card padding, borders) is structural and does not count: where it lands inside a run of identical rows makes no visible difference. Offset-run plans treat blank structural padding as matched rather than painting it green or red: a one-sided row carries content only when at least `CONTENT_INK_MIN` (16) full-width ink pixels are present. A one-sided content row that duplicates a claimed row in the other image within `STRUCTURAL_DUPLICATE_COST` (0.05 row ink cost) at an offset within `STRUCTURAL_DUPLICATE_WINDOW` (3) of the neighboring stable runs is a compensating rendering band, not a new or deleted line, and stays matched. An unresolved band at a shift boundary splits into changed-ink rows and padding: a baseline ink row pairs with the current row at the preceding stable offset when that row carries ink and is free, otherwise with its best evidence offset when that offset sits within the duplicate window of the neighboring runs, otherwise it is a red deletion. Leading blank rows stay with the preceding offset only when every candidate current row is free; trailing blank rows follow the last paired content offset when free, otherwise they are the deleted region's blank tail. A candidate current row already claimed by a stable run is never a free partner. Inside a paired row, a mismatch set with fewer than `CONTENT_INK_MIN` mismatched pixels is a localized rendering displacement (a glyph or badge edge drawn a few rows off its text) only when every mismatch has both background evidence — the baseline pixel exists in a claimed current row — and foreground evidence — the current pixel exists in a claimed baseline row — at one common non-zero relative offset within the duplicate window; inserted current rows and deleted baseline rows count as claimed rows on their respective sides. A mismatch with only one side's duplicate, such as a new small mark on a uniform background whose old background has a neighboring current copy but whose foreground exists nowhere in the baseline, is content and stays orange. A contiguous displaced run is suppressed only when it borders matched rows or blank structural one-sided rows; a run bordering unexplained mismatched content or content-carrying one-sided rows stays painted as part of that edit. A mismatch set reaching `CONTENT_INK_MIN` is a structured glyph or region recolor and stays orange. Width changes, ignore regions, resource limits, and ambiguous exact-row matches whose offset-run mapping also fails fall back to v1 coordinate comparison and record the fallback reason; coordinate-fallback metadata carries neither `alignmentStrategy` nor `tolerance`. This is a raster row alignment aid, not DOM or arbitrary component matching.
 - Both policies preserve the explicit dimension-change signal: a source height/width change remains a changed route even when the aligned mismatch ratio is at or below the threshold. Empty output corners do not enter the denominator.
 - Local diff images are rendered with a semantic palette: orange = changed pixels, green = added or inserted pixels, red = removed or deleted pixels. Equal-dimension strict diffs (`generateDiffImage`) use orange for changed pixels and cannot contain added/removed pixels. Reports render a legend whenever a local diff image is embedded; summaries that carry only comparison metadata (Snap provider runs, which render diffs hosted-side) render no legend.
 - `dimensionChanges[]` remains part of the summary contract but is empty for local comparisons in v1. Strict same-dimension comparison (`compareBuffers`) remains available to direct `@snapdrift/compare-core`/`comparePngs` callers that pass no policy.
@@ -386,7 +400,19 @@ since a caller may raise it per call.
 Policy v2 uses the aligned output height for this same budget. Because an
 inserted row and a deleted row each occupy an output row, that height can be up
 to the sum of the baseline and current heights. If the aligned canvas exceeds
-the budget, v2 returns `comparison_too_large` before allocating a diff image.
+the budget, both the exact-row alignment path and the offset-run path fall back
+to coordinate comparison with `fallbackReason: 'alignment-limit'`; the
+coordinate union must still fit, and an oversized coordinate union still throws
+`comparison_too_large` before allocating a diff image.
+
+The offset-run scoring pass is separately bounded by `MAX_OFFSET_SCORE_VISITS`
+(2.5e9). Its visit count is `baselineHeight × 201 offsets ×
+ceil(baselineWidth / 2)` (sampling every second column, offsets `-40..160`);
+above that budget, or when the per-row cost table and Viterbi backpointers exceed
+their byte ceiling, the offset-run path falls back to coordinate comparison with
+`fallbackReason: 'alignment-limit'`. The 2.5e9 budget admits a 1170×17187 mobile
+pair (~2.02e9 visits) that the previous 1.5e9 budget rejected, while the
+1440×3386 desktop pair stays at ~0.49e9.
 
 `32 × 1024 × 1024` is the *default* ceiling, not an algorithm property. The cost
 is dominated by the decoded images: both RGBA inputs (4 bytes per pixel each) are
@@ -545,6 +571,8 @@ Publication sends `publicationMode: "complete"` and the source run id both as to
 ### Local-capture hybrid
 
 If `baseUrl` resolves to a local address (see [`isLocalBaseUrl`](#islocalbaseurl-detection) below), SnapDrift runs Playwright on the runner to render the page and uploads the resulting screenshots to Snap. This is necessary whenever your `baseUrl` is a server only the runner can reach (the common case) — Snap's render worker cannot reach a `127.0.0.1` or `localhost` server.
+
+In the hybrid path, the latest-baseline lookup for diff runs starts before local capture so it overlaps with rendering, and the per-route capture-create and `local-result` uploads run with up to 4 routes in flight. The first failed upload stops further uploads and fails the capture. Local screenshot dimensions come from the PNG header (signature and IHDR are validated; pixel data is not decoded at capture time).
 
 The hybrid path is transparent to the user: the same provider factory picks it, and the output `results.json` carries `provider: "snap"` plus `captureMode: "local-upload"` so downstream consumers can tell which path produced the run. The action's `Install Playwright Chromium` step is gated on this hybrid, so a `provider: "snap"` config with a remote `baseUrl` will not download Playwright Chromium.
 
